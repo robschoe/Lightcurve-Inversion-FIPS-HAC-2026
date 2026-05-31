@@ -1,0 +1,26 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from PIL import Image
+import glob
+
+# Ordner mit PNG-Dateien
+files = sorted(glob.glob("C:/Users/rober/blendertest/frames/*.png"))
+
+brightness = []
+
+for f in files:
+    img = Image.open(f).convert("L")  # Graustufen
+    img_array = np.array(img)
+    print(img_array.mean())
+    # mittlere Helligkeit berechnen
+    brightness.append(img_array.mean())
+   
+time = np.arange(len(brightness))
+
+# Plot der Lightcurve
+plt.figure()
+plt.plot(time, brightness)
+plt.xlabel("Frame / Time")
+plt.ylabel("Brightness")
+plt.title("Synthetic Lightcurve")
+plt.show()
