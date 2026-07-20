@@ -19,7 +19,7 @@ R_max = 5.313693321295838
 
 class AsteroidSDFPointDataset(Dataset):
     def __init__(self, root, n_points=8192):
-        self.root = Path("C:/Users/rober/Lightcurve-Inversion-FIPS-HAC-2026/dataset/batch1")
+        self.root = Path.cwd()
         self.n_points = n_points
 
         self.samples = sorted([
@@ -357,9 +357,10 @@ model.eval()
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
-lc = load_lightcurve("C:/Users/rober/Lightcurve-Inversion-FIPS-HAC-2026/brightnessasteroid1.stl.csv")
+root=Path.cwd()
+lc = load_lightcurve(root/"brightnessasteroid5radius2.0475867806576935.stl.csv")
 lc = torch.tensor(lc.T, dtype=torch.float32).unsqueeze(0).to(device)
-radius_value = 1.12
+radius_value = 2.0475867806576935
 
 radius_model = torch.tensor([radius_value / R_max], dtype=torch.float32, device=device)
 
