@@ -52,39 +52,28 @@ def signed_distance_chunked(mesh, points, chunk=200000):
     return np.concatenate(values)
 
 def sample_sdf_from_mesh(stl_path, radius, n_points=8192, tau=0.1):
-    mesh = trimesh.load(stl_path)
+    mesh = trimesh.load(stl_path)                                       #load mesh
 
     if isinstance(mesh, trimesh.Scene):
         mesh = trimesh.util.concatenate(list(mesh.geometry.values()))
-
     mesh = mesh.copy()
 
-    # Radius-normalisieren
-    mesh.vertices[:,0] /= radius
+    mesh.vertices[:,0] /= radius                                        #scale coordinates
     mesh.vertices[:,1] /= radius
 
-    n_surface = int(0.7 * n_points)
-    n_uniform = n_points - n_surface
+    n_surface = int(0.7 * n_points)                                     #70% of generated points near surface
+    n_uniform = n_points - n_surface                                    #30% uniformly distributed in [-1,1]³
 
-    surface_points = mesh.sample(n_surface)
-    near_surface = surface_points + np.random.normal(scale=0.03, size=surface_points.shape)
-
-    uniform = np.random.uniform(-1, 1, size=(n_uniform, 3))
+    surface_points = mesh.sample(n_surface)                             #sample surface points
+    near_surface = surface_points + np.random.normal(scale=0.03, size=surface_points.shape)     #add noise
+    uniform = np.random.uniform(-1, 1, size=(n_uniform, 3))             #sample uniform points
 
     points = np.concatenate([near_surface, uniform], axis=0)
-    points = np.clip(points, -1, 1)
+    points = np.clip(points, -1, 1)                                     #respect bounding cylinder
 
-    # signed distance
-    sdf = trimesh.proximity.signed_distance(mesh, points)
-
-    # je nach Trimesh-Version: Vorzeichen prüfen!
-    # häufig: outside negative, inside positive
-    # Falls nötig:
-    # sdf = -sdf
-
-    sdf = np.clip(sdf, -tau, tau)
-    sdf = sdf / tau
-
+    sdf = trimesh.proximity.signed_distance(mesh, points)               #calculate sdf for each point
+    sdf = np.clip(sdf, -tau, tau)                                       #truncate since surface is to be learned
+    sdf = sdf / tau                                                     #normalize sdf
     return points.astype(np.float32), sdf.astype(np.float32)
 
 def stl_to_sdf_grid(stl_path, radius, resolution=128, tau=0.1):
@@ -138,8 +127,9 @@ n_points=8192
 n_sets=4
 tau=0.1
 
-for x in range(1):
-    root = Path(f"C:/Users/rober/Python Datengenerierung/dataset/batch{x+1}")
+for x in range(2):
+    root=Path.cwd()
+    root = root/f"dataset2/batch{21+x}"
 
     samples = sorted([
         p for p in root.rglob("sample*")
@@ -151,7 +141,6 @@ for x in range(1):
     for folder in tqdm(samples):
         stl_path = sorted(folder.glob("asteroid*.stl"))[0]
         radius = parse_radius_from_stl(stl_path)
-        voxel_path = folder / "sdf_res32.npy"
 
         for k in range(n_sets):
             points_path = folder / f"points_{n_points}_{k}.npy"

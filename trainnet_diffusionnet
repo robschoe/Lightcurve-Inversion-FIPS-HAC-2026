@@ -1,0 +1,620 @@
+import trimesh
+import numpy as np
+import pandas as pd
+from pathlib import Path
+import torch
+from torch.utils.data import Dataset
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from skimage import measure
+import re
+import os
+import time
+import torch.nn.functional as F
+import sys
+
+repo_path = Path("C:/Users/rober/diffusion-net-master/diffusion-net-master/src").resolve()
+sys.path.insert(0, str(repo_path))
+
+import diffusion_net
+
+start = time.time()
+start2=start
+
+R_max = 5.313693321295838
+
+class AsteroidDiffusionDataset(Dataset):
+    def __init__(self, root, template_verts):
+        self.root = Path.cwd()
+        self.root=self.root/"dataset"
+
+        self.samples = sorted([
+            p for p in self.root.rglob("sample*")
+            if list(p.glob("brightness*.csv"))
+            and list(p.glob(f"points_8192_*.npy"))
+            and list(p.glob(f"sdf_8192_*.npy"))
+        ])
+
+        print(f"Found {len(self.samples)} samples")
+
+        template_dirs = template_verts.detach().cpu().numpy()
+        template_dirs = template_dirs / (
+            np.linalg.norm(template_dirs, axis=1, keepdims=True) + 1e-8
+        )
+
+        self.template_dirs = template_dirs
+        self.n_template_vertices = len(template_dirs)
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        folder = self.samples[idx]
+
+        csv_path = sorted(folder.glob("brightness*.csv"))[0]
+        stl_path = sorted(folder.glob("asteroid*.stl"))[0]
+
+        lc = load_lightcurve(csv_path)
+
+        radius_real = parse_radius_from_stl(stl_path)
+        radius_input = radius_real / R_max
+
+        # Zielradien cachen, damit sie nicht jedes Mal neu berechnet werden
+        cache_path = folder / f"target_radii_{self.n_template_vertices}.npy"
+
+        if cache_path.exists():
+            target_radii = np.load(cache_path).astype(np.float32)
+        else:
+            target_radii = target_radii_from_stl(
+                stl_path,
+                self.template_dirs
+            )
+            np.save(cache_path, target_radii)
+
+        lc = torch.tensor(lc.T, dtype=torch.float32)
+        target_radii = torch.tensor(target_radii, dtype=torch.float32)
+        radius = torch.tensor(radius_input, dtype=torch.float32)
+
+        return lc, target_radii, radius
+
+class DiffusionMeshDecoder(nn.Module):
+    def __init__(self, latent_dim=256, C_width=128):
+        super().__init__()
+
+        # Pro Vertex geben wir ein:
+        # 3 Koordinaten + latent_dim + 1 Radius-Parameter
+        C_in = 3 + latent_dim + 1
+
+        # Pro Vertex geben wir einen Radius aus
+        C_out = 1
+
+        self.diffnet = diffusion_net.layers.DiffusionNet(
+            C_in=C_in,
+            C_out=C_out,
+            C_width=C_width,
+            last_activation=None,
+            outputs_at="vertices"
+        )
+
+    def forward(self, latent, radius, template_verts, faces, mass, L, evals, evecs, gradX, gradY):
+        B = latent.shape[0]
+        V = template_verts.shape[0]
+        outputs = []
+
+        # stelle sicher, dass template_verts auf device ist
+        template_verts = template_verts.to(latent.device)
+
+        for b in range(B):
+            z_b = latent[b]       # (latent_dim,)
+            r_b = radius[b].view(1)
+
+            z_per_vertex = z_b[None, :].expand(V, -1).to(latent.device)
+            r_per_vertex = r_b[None, :].expand(V, -1).to(latent.device)
+
+            # template_verts already on same device
+            features = torch.cat([template_verts, z_per_vertex, r_per_vertex], dim=-1)
+
+            raw = self.diffnet(
+                features,
+                mass,
+                L=L,
+                evals=evals,
+                evecs=evecs,
+                gradX=gradX,
+                gradY=gradY,
+                faces=faces
+            )
+
+            raw = raw.squeeze(-1)
+            pred_r = F.softplus(raw) + 1e-4
+            outputs.append(pred_r)
+
+        pred_radii = torch.stack(outputs, dim=0)
+        return pred_radii
+
+class LightcurveDiffusionNet(nn.Module):
+    def __init__(self, num_cameras, latent_dim=256, C_width=128):
+        super().__init__()
+
+        self.encoder = LightcurveEncoder(
+            num_cameras=num_cameras,
+            latent_dim=latent_dim
+        )
+
+        self.decoder = DiffusionMeshDecoder(
+            latent_dim=latent_dim,
+            C_width=C_width
+        )
+
+    def forward(
+        self,
+        lc,
+        radius,
+        template_verts,
+        faces,
+        mass,
+        L,
+        evals,
+        evecs,
+        gradX,
+        gradY
+    ):
+        latent = self.encoder(lc)
+
+        pred_radii = self.decoder(
+            latent,
+            radius,
+            template_verts,
+            faces,
+            mass,
+            L,
+            evals,
+            evecs,
+            gradX,
+            gradY
+        )
+
+        return pred_radii
+
+def create_template_sphere(subdivisions=5):
+    """
+    Erstellt ein festes Kugel-Template.
+    
+    subdivisions=3 -> grober
+    subdivisions=4 -> meist guter Start
+    subdivisions=5 -> feiner, aber langsamer
+    """
+    mesh = trimesh.creation.icosphere(
+        subdivisions=subdivisions,
+        radius=1.0
+    )
+
+    verts = torch.tensor(mesh.vertices, dtype=torch.float32)
+    faces = torch.tensor(mesh.faces, dtype=torch.long)
+
+    return verts, faces
+
+def target_radii_from_stl(stl_path, template_dirs):
+    """
+    Berechnet Zielradien für ein STL entlang der Template-Richtungen.
+
+    template_dirs: numpy array, shape (V, 3), normierte Richtungen
+    returns: radii, shape (V,)
+    """
+    mesh = trimesh.load(stl_path, force="mesh")
+
+    if isinstance(mesh, trimesh.Scene):
+        mesh = trimesh.util.concatenate(list(mesh.geometry.values()))
+
+    mesh = mesh.copy()
+
+    radius_real = parse_radius_from_stl(stl_path)
+
+    # Gleiche Normalisierung wie bei deinem SDF-Code:
+    # x/y werden durch radius geteilt, z bleibt unverändert.
+    mesh.vertices[:, 0] /= radius_real
+    mesh.vertices[:, 1] /= radius_real
+
+    try:
+        mesh.fix_normals()
+    except Exception:
+        pass
+
+    origins = np.zeros_like(template_dirs, dtype=np.float64)
+    directions = template_dirs.astype(np.float64)
+
+    locations, index_ray, index_tri = mesh.ray.intersects_location(
+        ray_origins=origins,
+        ray_directions=directions,
+        multiple_hits=True
+    )
+
+    radii = np.ones(len(template_dirs), dtype=np.float32)
+
+    if len(locations) == 0:
+        print(f"Warning: no ray hits for {stl_path}")
+        return radii
+
+    hit_distances = np.linalg.norm(locations, axis=1)
+
+    # Für jeden Strahl den äußersten Treffer nehmen
+    for i in range(len(template_dirs)):
+        hits = hit_distances[index_ray == i]
+
+        if len(hits) > 0:
+            radii[i] = hits.max()
+
+    return radii.astype(np.float32)
+
+def parse_radius_from_stl(stl_path):
+    m = re.search(r"radius([0-9]+(?:\.[0-9]+)?)", stl_path.name)
+
+    if m is None:
+        raise ValueError(f"Could not parse radius from {stl_path.name}")
+
+    return float(m.group(1))
+
+def load_lightcurve(csv_path):
+    data = pd.read_csv(csv_path, header=None)
+
+    values = data.values.astype(np.float32)
+
+    # Falls erste Spalte Framezahl ist:
+    values = values[:, 1:]
+
+    values = values / (values.mean(axis=0, keepdims=True) + 1e-8)
+
+    return values
+
+def reconstruct_mesh_diffusionnet(
+    model,
+    lc,
+    radius_model,      # scalar Tensor (B=1) or python float
+    radius_real,       # original radius float for rescaling x/y
+    template_verts,    # torch.Tensor (V,3) - can be CPU or CUDA
+    template_faces,    # torch.Tensor (F,3) or numpy array
+    mass, L, evals, evecs, gradX, gradY,
+    out_path="recon.stl"
+):
+    model.eval()
+
+    # Device where the model lives
+    model_device = next(model.parameters()).device
+
+    # Ensure input lightcurve and radius are on model device
+    if not torch.is_tensor(lc):
+        raise ValueError("lc must be a torch tensor")
+    lc = lc.to(model_device)
+
+    if not torch.is_tensor(radius_model):
+        radius_model = torch.tensor([radius_model], dtype=torch.float32, device=model_device)
+    else:
+        radius_model = radius_model.to(model_device)
+        if radius_model.dim() == 0:
+            radius_model = radius_model.unsqueeze(0)
+
+    # Ensure template_verts on same device as model (so multiplication works)
+    template_verts_dev = template_verts.to(model_device, dtype=torch.float32)
+
+    # Also ensure operators and faces are on the expected device
+    # (you probably moved them earlier; if not, do it here)
+    mass = mass.to(model_device) if torch.is_tensor(mass) else mass
+    L = L.to(model_device) if torch.is_tensor(L) else L
+    evals = evals.to(model_device) if torch.is_tensor(evals) else evals
+    evecs = evecs.to(model_device) if torch.is_tensor(evecs) else evecs
+    gradX = gradX.to(model_device) if torch.is_tensor(gradX) else gradX
+    gradY = gradY.to(model_device) if torch.is_tensor(gradY) else gradY
+    faces_dev = template_faces.to(model_device, dtype=torch.long) if torch.is_tensor(template_faces) else torch.from_numpy(template_faces).to(model_device)
+
+    # Run model -> predict radii (B,V)
+    with torch.no_grad():
+        pred_radii = model(
+            lc,
+            radius_model,
+            template_verts_dev,
+            faces_dev,
+            mass,
+            L,
+            evals,
+            evecs,
+            gradX,
+            gradY
+        )
+
+    # pred_radii should be on model_device and shape (B, V) ; handle B=1
+    if pred_radii.dim() == 1:
+        pred_radii = pred_radii.unsqueeze(0)
+
+    # Debug print: devices and shapes
+    print("Devices and shapes:")
+    print(" model device:", model_device)
+    print(" template_verts_dev:", template_verts_dev.device, template_verts_dev.shape)
+    print(" pred_radii:", pred_radii.device, pred_radii.shape)
+
+    # Use first batch element
+    pred_r = pred_radii[0]                # shape (V,)
+    dirs = F.normalize(template_verts_dev, dim=-1)  # (V,3), on same device
+
+    # Ensure pred_r is broadcastable: (V,) -> (V,1)
+    pred_verts = dirs * pred_r[:, None]  # elementwise on model_device
+
+    # Convert to cpu numpy for trimesh export
+    pred_verts_np = pred_verts.detach().cpu().numpy()
+    if torch.is_tensor(template_faces):
+        faces_np = template_faces.detach().cpu().numpy()
+    else:
+        faces_np = template_faces  # assume numpy
+
+    # Adjust coordinates like in your SDF pipeline (x/y scaled by radius_real)
+    pred_verts_np[:, 0] *= radius_real
+    pred_verts_np[:, 1] *= radius_real
+
+    mesh = trimesh.Trimesh(vertices=pred_verts_np, faces=faces_np, process=True)
+    mesh.export(out_path)
+
+    return mesh
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+def edges_from_faces(faces):
+    """
+    faces: (F,3) LongTensor
+    returns: (E,2) LongTensor mit einzigartigen Kanten
+    """
+    edges = torch.cat([
+        faces[:, [0, 1]],
+        faces[:, [1, 2]],
+        faces[:, [2, 0]]
+    ], dim=0)
+
+    edges = torch.sort(edges, dim=1)[0]
+    edges = torch.unique(edges, dim=0)
+
+    return edges
+
+def edge_difference_loss(pred_r, target_r, edges):
+    """
+    pred_r:   (B,V)
+    target_r: (B,V)
+    edges:    (E,2)
+    """
+    i = edges[:, 0]
+    j = edges[:, 1]
+
+    pred_diff = pred_r[:, i] - pred_r[:, j]
+    target_diff = target_r[:, i] - target_r[:, j]
+
+    return F.smooth_l1_loss(pred_diff, target_diff)
+
+def to_torch(x, device=device, dtype=torch.float32):
+    """
+    Wandelt x nach Torch-Tensor konvertiert und verschiebt ihn auf device.
+    Unterstützt: numpy.ndarray, torch.Tensor, torch.sparse.*, oder None.
+    """
+    if x is None:
+        return None
+
+    # NumPy -> Torch
+    if isinstance(x, np.ndarray):
+        return torch.from_numpy(x).to(device=device, dtype=dtype)
+
+    # SciPy sparse (falls zufällig) -> dense Torch (vorsicht Speicher)
+    try:
+        import scipy.sparse as sp
+        if isinstance(x, sp.spmatrix):
+            arr = x.toarray().astype(np.float32)
+            return torch.from_numpy(arr).to(device=device, dtype=dtype)
+    except Exception:
+        pass
+
+    # already torch tensor
+    if torch.is_tensor(x):
+        # Falls schon ein SparseTensor (torch >= 1.13: torch.sparse_coo_tensor)
+        if x.is_sparse:
+            # Sparse tensor: stelle dtype sicher, dann auf device verschieben
+            # einige ältere APIs liefern deprecated torch.sparse.FloatTensor; hier coalesce nutzen
+            try:
+                x = x.coalesce()
+            except Exception:
+                pass
+            # dtype und device
+            return x.to(device=device).to(dtype=dtype)
+        else:
+            return x.to(device=device, dtype=dtype)
+
+    # Fallback: versuche Konvertierung über np.array
+    try:
+        arr = np.array(x)
+        return torch.from_numpy(arr).to(device=device, dtype=dtype)
+    except Exception as err:
+        raise TypeError(f"Kann Objekt vom Typ {type(x)} nicht in Torch konvertieren: {err}")
+
+class LightcurveEncoder(nn.Module):
+    def __init__(self, num_cameras, latent_dim=256):
+        super().__init__()
+
+        self.net = nn.Sequential(
+            nn.Conv1d(num_cameras, 64, kernel_size=7, padding=3),       #cameras as input channels
+            nn.SiLU(),
+
+            nn.Conv1d(64, 128, kernel_size=7, padding=3),
+            nn.SiLU(),
+
+            nn.Conv1d(128, 256, kernel_size=7, padding=3),
+            nn.SiLU(),
+
+            nn.AdaptiveAvgPool1d(1),                                    #pooling for global curve descriptor
+            nn.Flatten(),
+
+            nn.Linear(256, latent_dim),                                 #produce latent code
+            nn.SiLU()
+        )
+
+    def forward(self, lc):
+        return self.net(lc)
+
+
+template_verts, template_faces = create_template_sphere(subdivisions=5)
+
+frames, mass, L, evals, evecs, gradX, gradY = diffusion_net.geometry.get_operators(
+    template_verts, template_faces, op_cache_dir="diffusionnet_cache"
+)
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+mass  = to_torch(mass, device=device)
+L     = to_torch(L, device=device)
+evals = to_torch(evals, device=device)
+evecs = to_torch(evecs, device=device)
+gradX = to_torch(gradX, device=device)
+gradY = to_torch(gradY, device=device)
+
+dataset = AsteroidDiffusionDataset(
+    "dataset",
+    template_verts=template_verts.detach().cpu()
+)
+
+loader = DataLoader(
+    dataset,
+    batch_size=4,
+    shuffle=True
+)
+
+commence=1
+if commence==1:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    checkpoint = torch.load("checkpoint100_diffusionnet2.pth", map_location=device)
+
+    model = LightcurveDiffusionNet(
+        num_cameras=28,
+        latent_dim=256,
+        C_width=128
+    ).to(device)
+
+    model.load_state_dict(checkpoint["model_state_dict"])
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    start_epoch = checkpoint["epoch"] +1
+    model.train()
+else:
+
+    # Beispielwerte anpassen
+    num_cameras = 28
+    frames = 360
+    resolution = 64
+
+    model = LightcurveDiffusionNet(
+        num_cameras=28,
+        latent_dim=256,
+        C_width=128
+    ).to(device)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    start_epoch = 0
+
+loss_fn = nn.SmoothL1Loss()
+
+
+for epoch in range(start_epoch, start_epoch + 1):
+    model.train()
+    total_loss = 0.0
+
+    for lc, target_radii, radius in loader:
+        lc = lc.to(device)
+        target_radii = target_radii.to(device)
+        radius = radius.to(device)
+
+        pred_radii = model(
+            lc,
+            radius,
+            template_verts,
+            template_faces,
+            mass,
+            L,
+            evals,
+            evecs,
+            gradX,
+            gradY
+        )
+
+        edges = edges_from_faces(template_faces).to(device)
+
+        loss_r = F.smooth_l1_loss(pred_radii, target_radii)
+        loss_edge = edge_difference_loss(pred_radii, target_radii, edges)
+
+        loss = loss_r + 0.2 * loss_edge
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+
+    if epoch % 100 == 0:
+        torch.save({
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "loss": total_loss / len(loader),
+            "num_cameras": 28,
+            "latent_dim": 256,
+            "R_max": R_max,
+            "template_subdivisions": 5
+        }, f"checkpoint{epoch}_diffusionnet2.pth")
+    
+    end2 = time.time()
+    length = end2 - start2
+
+    print(f"Epoch {epoch}: loss = {total_loss / len(loader):.6f},",length, "seconds!")
+    with open("losses.txt", "a") as myfile:
+        myfile.write(f"Epoch: {epoch} Loss: {total_loss / len(loader):.4f} \n")
+    start2=end2
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+checkpoint = torch.load("checkpoint100_diffusionnet2.pth", map_location=device)
+
+model = LightcurveDiffusionNet(
+    num_cameras=28,
+    latent_dim=256,
+    C_width=128
+).to(device)
+
+model.load_state_dict(checkpoint["model_state_dict"])
+model.eval()
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+root=Path.cwd()
+lc = load_lightcurve(root/"brightnessasteroid13radius1.642108225993951.stl.csv")
+lc = torch.tensor(lc.T, dtype=torch.float32).unsqueeze(0).to(device)
+radius_value = 1.642108225993951
+
+radius_model = torch.tensor(
+    [radius_value / R_max],
+    dtype=torch.float32,
+    device=device
+)
+
+mesh = reconstruct_mesh_diffusionnet(
+    model=model,
+    lc=lc,
+    radius_model=radius_model,
+    radius_real=radius_value,
+    template_verts=template_verts,
+    template_faces=template_faces,
+    mass=mass,
+    L=L,
+    evals=evals,
+    evecs=evecs,
+    gradX=gradX,
+    gradY=gradY,
+    out_path="asteroid_diffusionnet_reconstruction.stl"
+)
+
+end = time.time()
+length = end - start
+
+# Show the results : this can be altered however you like
+print("It took", length, "seconds!")

@@ -1,12 +1,14 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import pandas as pd
+from pathlib import Path
 
-data1 = np.loadtxt("brightnessasteroid10007radius2.02317048971541.stl.csv", delimiter=",")
-#data = np.loadtxt("Asteroid03_lightcurve_intensity.txt", delimiter=",", skiprows=1)
+#data1 = np.loadtxt("brightnessasteroid5radius2.0475867806576935.stl.csv", delimiter=",")
+data = np.loadtxt("brightnessasteroid3.stl.csv", delimiter=",", skiprows=1)
 
-camsel=5
+camsel=20
 
-cam1 = data1[:,camsel]
+cam1 = data[:,camsel]
 
 cam1 = cam1 / np.mean(cam1)
 
@@ -16,9 +18,9 @@ cam1 = cam1 / np.mean(cam1)
 plt.plot(range(len(cam1)), cam1)
 plt.xlabel("Frame")
 plt.ylabel("Brightness")
-plt.title("Lightcurve Camera 1")
+plt.title(f"Lightcurve Camera {camsel}")
 
-data2 = np.loadtxt("brightnessasteroid10005radius1.462970141641174.stl.csv", delimiter=",")
+data2 = np.loadtxt("Asteroid03_lightcurve_intensity_blender.txt", delimiter=",")
 
 frames = data2[:,0]
 cam2 = data2[:,camsel]
@@ -28,7 +30,7 @@ cam2 = cam2 / np.mean(cam2)
 plt.plot(range(len(cam2)), cam2)
 plt.xlabel("Frame")
 plt.ylabel("Brightness")
-plt.title("Lightcurve Camera 1")
+plt.title(f"Lightcurve Camera {camsel}")
 plt.show()
 
 # x=[]
@@ -94,3 +96,94 @@ plt.show()
 #     plt.ylabel("Brightness")
 #     plt.title("Synthetic Lightcurve")
 #     plt.show()
+
+def load_brightness_file(path):
+    path = Path(path)
+
+    # Liest CSV/TXT mit Komma, Semikolon, Tab oder Leerzeichen als Trenner
+    df = pd.read_csv(
+        path,
+        sep=r"[,\s;]+",
+        engine="python",
+        header=None,
+        comment="#"
+    )
+
+    # Falls durch Trennzeichen leere Spalten entstehen
+    df = df.dropna(axis=1, how="all")
+
+    if df.shape[1] != 29:
+        raise ValueError(f"{path} hat {df.shape[1]} Spalten, erwartet werden 29.")
+
+    columns = ["frame"] + [f"cam_{i:02d}" for i in range(1, 29)]
+    df.columns = columns
+
+    return df
+
+
+def compare_curves(y1, y2):
+    y1 = np.asarray(y1, dtype=float)
+    y2 = np.asarray(y2, dtype=float)
+
+    # NaN/Inf entfernen
+    mask = np.isfinite(y1) & np.isfinite(y2)
+    y1 = y1[mask]
+    y2 = y2[mask]
+
+    diff = y1 - y2
+
+    mse = np.mean(diff ** 2)
+    rmse = np.sqrt(mse)
+    mae = np.mean(np.abs(diff))
+
+    # Korrelation nur möglich, wenn beide Kurven nicht konstant sind
+    if np.std(y1) > 0 and np.std(y2) > 0:
+        corr = np.corrcoef(y1, y2)[0, 1]
+    else:
+        corr = np.nan
+
+    # Normalisierter RMSE bezogen auf Wertebereich von Kurve 1
+    value_range = np.max(y1) - np.min(y1)
+    if value_range > 0:
+        nrmse = rmse / value_range
+    else:
+        nrmse = np.nan
+
+    return rmse, mae, corr, nrmse
+
+root=Path.cwd()
+file_a = root/r"brightnessasteroid3.stl.csv"
+file_b = root/r"Asteroid03_lightcurve_intensity_blender.txt"
+
+df_a = load_brightness_file(file_a)
+df_b = load_brightness_file(file_b)
+
+# Nach Frame-Nummer zusammenführen
+df = pd.merge(df_a, df_b, on="frame", suffixes=("_a", "_b"))
+
+results = []
+
+for cam in [f"cam_{i:02d}" for i in range(1, 29)]:
+    y_a = df[f"{cam}_a"].values
+    y_b = df[f"{cam}_b"].values
+
+    rmse, mae, corr, nrmse = compare_curves(y_a, y_b)
+
+    results.append({
+        "camera": cam,
+        "RMSE": rmse,
+        "MAE": mae,
+        "Correlation": corr,
+        "NRMSE": nrmse
+    })
+
+results_df = pd.DataFrame(results)
+
+print(results_df)
+
+# Durchschnitt über alle Kameras
+print("\nMittelwerte:")
+print(results_df[["RMSE", "MAE", "Correlation", "NRMSE"]].mean())
+
+# Optional speichern
+results_df.to_csv("vergleich_ergebnisse.csv", index=False)

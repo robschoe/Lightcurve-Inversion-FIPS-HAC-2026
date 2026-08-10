@@ -5,7 +5,8 @@ import os
 import shutil
 
 
-root = Path("C:/Users/rober/Python Datengenerierung/damit-20260705T000301Z")
+root=Path.cwd()
+root = root/"damit-20260705T000301Z"
 
 files = list(root.rglob("obj.txt"))
 

@@ -1,4 +1,3 @@
-import bpy
 import math
 import numpy as np
 import matplotlib.pyplot as plt
@@ -14,67 +13,20 @@ from scipy.signal import savgol_filter
 from pathlib import Path
 import os
 import time
+import bpy
 
+
+root=Path.cwd()
 #Test Asteroid
-obj_path = "C:/Users/rober/blendertest/asteroid3.stl"
+obj_path = root/"asteroid3.stl"
 
 #Path for Scans of Asteroid in Blender
-output_path = "/Users/rober/blendertest/frames/"
+output_path = root/"frames"
 #Frames
 frames = 360
 brightness = []
 
 start = time.time()
-
-def generate_asteroid(convex):
-    bpy.ops.object.select_all(action='SELECT')
-    bpy.ops.object.delete()
-
-    points = []
-    N = 200
-
-    for i in range(N):
-        r = np.sqrt(np.random.rand())
-        theta = 2*np.pi*np.random.rand()
-
-        x = r*np.cos(theta)
-        y = r*np.sin(theta)
-        z = np.random.uniform(-1,1)
-
-        points.append([x,y,z])
-
-    points = np.array(points)
-
-    if convex==1:
-        mesh = bpy.data.meshes.new("asteroid")
-        obj = bpy.data.objects.new("asteroid", mesh)
-        bpy.context.collection.objects.link(obj)
-
-        bm = bmesh.new()
-
-        verts = [bm.verts.new(p) for p in points]
-
-        bmesh.ops.convex_hull(bm, input=verts)
-
-        bm.to_mesh(mesh)
-        bm.free()
-        bpy.ops.wm.stl_export(filepath=obj_path)
-    else:
-
-        alpha = 1.5
-        shape = alphashape.alphashape(points, alpha)
-        mesh = trimesh.Trimesh(vertices=shape.vertices,
-                            faces=shape.faces)
-        mesh.export("asteroid.stl")
-
-# bpy.ops.mesh.primitive_cylinder_add(
-#     radius=1,
-#     depth=2,
-#     location=(0,0,0)
-# )
-# obj = bpy.context.object
-
-#generate_asteroid(1)
 
 bpy.context.scene.world.use_nodes = True
 bg = bpy.context.scene.world.node_tree.nodes["Background"]
@@ -168,124 +120,118 @@ sun_dir = torch.tensor(sun_dir_np, dtype=torch.float32, device=device)
 view_dirs = torch.tensor(view_dirs_np, dtype=torch.float32, device=device)
 
 g=18
-for lol in range(1):
-
-    root = Path(f"C:/Users/rober/Python Datengenerierung/dataset/batch{g}")
+for index in range(8):
+    root=Path.cwd()
+    root = root/f"dataset2/test/batch{1+index}"
 
     asteroids = list(root.rglob("asteroid*.stl"))
     for asteroid in asteroids:
-        brightness=[]
+        rootx=root/os.path.dirname(asteroid)
+        brightnesses = list(rootx.rglob("brightness*.csv"))
 
+        if brightnesses==[]:
+            brightness=[]
 
-        # import asteroid
-        bpy.ops.wm.stl_import(filepath=f"{asteroid}")
+            bpy.ops.wm.stl_import(filepath=f"{asteroid}")   #Asteroiden importieren
+            obj = bpy.context.selected_objects[0]
+            obj.location = (0,0,0)
+            mesh = obj.data                                 #Mesh extrahieren
 
-        obj = bpy.context.selected_objects[0]
+            centers = []
+            normals = []
+            areas = []
 
-        obj.location = (0,0,0)
+            for poly in mesh.polygons:                      #centers, normals und areas für alle Polygone extrahieren
+                centers.append([poly.center.x, poly.center.y, poly.center.z])
+                normals.append([poly.normal.x, poly.normal.y, poly.normal.z])
+                areas.append(poly.area)
 
-        mesh = obj.data
+            centers_np = np.array(centers)
+            normals_np = np.array(normals)
+            areas_np = np.array(areas)
 
-        centers = []
-        normals = []
-        areas = []
+            centers = torch.tensor(centers_np, dtype=torch.float32, device=device)
+            normals = torch.tensor(normals_np, dtype=torch.float32, device=device)
+            areas = torch.tensor(areas_np, dtype=torch.float32, device=device)
 
-        for poly in mesh.polygons:
-            centers.append([poly.center.x, poly.center.y, poly.center.z])
-            normals.append([poly.normal.x, poly.normal.y, poly.normal.z])
-            areas.append(poly.area)
+            for frame in range(frames):
+                frame_values = []
+                frame_values.append(frame)
+                R=Rs[frame]                         #Get rotationsmatrix for given frame
 
-        centers_np = np.array(centers)
-        normals_np = np.array(normals)
-        areas_np = np.array(areas)
+                rotated_normals = normals @ R.T     #Apply rotation
+                rotated_centers = centers @ R.T
 
-        centers = torch.tensor(centers_np, dtype=torch.float32, device=device)
-        normals = torch.tensor(normals_np, dtype=torch.float32, device=device)
-        areas = torch.tensor(areas_np, dtype=torch.float32, device=device)
+                W = 512*2                           #Define granularity of projection
+                H = 512*2
 
-        for frame in range(frames):
+                illum = torch.clamp(rotated_normals @ sun_dir, min=0)       #Lambert's cosine law
+                                                                            #calculate Illumination vector, 0 if not illuminated 
+                                                                            #angle between normal and sun otherwise
+                for cam in cameras:
+                    cam_pos = torch.tensor([cam.location.x, cam.location.y, cam.location.z], device=device)
+                    view = (cam_pos)
+                    view = view / torch.linalg.norm(view)           #Normalized view vector
 
-            frame_values = []
+                    up = torch.tensor([0.,0.,1.], device=device)
+                    x = torch.cross(view, up)
+                    x = x / torch.linalg.norm(x)                    #
 
-            frame_values.append(frame)
+                    y = torch.cross(x, view)
 
-            R=Rs[frame]
+                    rel = rotated_centers - cam_pos
 
-            rotated_normals = normals @ R.T
-            rotated_centers = centers @ R.T
+                    cx = rel @ x                                    #Orthographic projection
+                    cy = rel @ y
+                    cz = rel @ view
 
-            W = 512*2
-            H = 512*2
+                    px = ((cx - cx.min())/(cx.max()-cx.min()) * (W-1)).long()       #Calculate coordinates of pixels
+                    py = ((cy - cy.min())/(cy.max()-cy.min()) * (H-1)).long()
 
-            illum = torch.clamp(rotated_normals @ sun_dir, min=0)
+                    px = torch.clamp(px,0,W-1)
+                    py = torch.clamp(py,0,H-1)
 
-            for cam in cameras:
-                cam_pos = torch.tensor([cam.location.x, cam.location.y, cam.location.z], device=device)
+                    # zbuf = torch.full((H,W), float('inf'), device=device)
+                    # face_id = torch.full((H,W), -1, dtype=torch.long, device=device)
 
-                view = (cam_pos)
-                view = view / torch.linalg.norm(view)
+                    # for i in range(len(px)):
+                    #     if cz[i] < zbuf[py[i],px[i]]:
+                    #         zbuf[py[i],px[i]] = cz[i]
+                    #         face_id[py[i],px[i]] = i
+                    # visible_faces = torch.unique(face_id[face_id >= 0])
 
-                up = torch.tensor([0.,0.,1.], device=device)
+                    flat_index = py * W + px
+                    zbuf_flat = torch.full((H*W,), float('inf'), device=device)             #initialize Z-Buffer
+                    face_id_flat = torch.full((H*W,), -1, dtype=torch.long, device=device)
+                    zbuf_flat = zbuf_flat.scatter_reduce(                                   #find smallest cz
+                        0,
+                        flat_index,
+                        cz,
+                        reduce="amin",
+                        include_self=True
+                    )
+                    visible_mask = cz == zbuf_flat[flat_index]                              #find visible areas
+                    visible_faces = torch.where(visible_mask)[0]
 
-                x = torch.cross(view, up)
-                x = x / torch.linalg.norm(x)
+                    vis = torch.clamp(rotated_normals @ view, min=0)                        #angle between polygon and camera
 
-                y = torch.cross(x, view)
+                    brightness_val = torch.sum(                                             #calculate brightness
+                        areas[visible_faces] *
+                        illum[visible_faces] *
+                        vis[visible_faces]
+                    )
+                    frame_values.append(brightness_val.item())
+                brightness.append(frame_values)
+            #brightness = savgol_filter(brightness, 11, 3, axis=0)
+            
+            path=os.path.dirname(asteroid)
+            asteroid=os.path.basename(asteroid)
 
-                rel = rotated_centers - cam_pos
+            print(asteroid)
+            print(path)
 
-
-                cx = rel @ x
-                cy = rel @ y
-                cz = rel @ view
-
-                px = ((cx - cx.min())/(cx.max()-cx.min()) * (W-1)).long()
-                py = ((cy - cy.min())/(cy.max()-cy.min()) * (H-1)).long()
-
-                px = torch.clamp(px,0,W-1)
-                py = torch.clamp(py,0,H-1)
-
-                # zbuf = torch.full((H,W), float('inf'), device=device)
-                # face_id = torch.full((H,W), -1, dtype=torch.long, device=device)
-
-                # for i in range(len(px)):
-                #     if cz[i] < zbuf[py[i],px[i]]:
-                #         zbuf[py[i],px[i]] = cz[i]
-                #         face_id[py[i],px[i]] = i
-                # visible_faces = torch.unique(face_id[face_id >= 0])
-
-                flat_index = py * W + px
-                zbuf_flat = torch.full((H*W,), float('inf'), device=device)
-                face_id_flat = torch.full((H*W,), -1, dtype=torch.long, device=device)
-                zbuf_flat = zbuf_flat.scatter_reduce(
-                    0,
-                    flat_index,
-                    cz,
-                    reduce="amin",
-                    include_self=True
-                )
-                visible_mask = cz == zbuf_flat[flat_index]
-                visible_faces = torch.where(visible_mask)[0]
-
-                vis = torch.clamp(rotated_normals @ view, min=0)
-
-                brightness_val = torch.sum(
-                    areas[visible_faces] *
-                    illum[visible_faces] *
-                    vis[visible_faces]
-                )
-                frame_values.append(brightness_val.item())
-            brightness.append(frame_values)
-        #brightness = savgol_filter(brightness, 11, 3, axis=0)
-        
-        path=os.path.dirname(asteroid)
-        asteroid=os.path.basename(asteroid)
-
-        print(asteroid)
-        print(path)
-
-        np.savetxt(f"{path}/brightness{asteroid}.csv", brightness, delimiter=",")
-    g+=1
+            np.savetxt(f"{path}/brightness{asteroid}.csv", brightness, delimiter=",")
+        g+=1
     
 
 end = time.time()

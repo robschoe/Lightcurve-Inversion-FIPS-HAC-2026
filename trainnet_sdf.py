@@ -20,6 +20,7 @@ R_max = 5.313693321295838
 class AsteroidSDFPointDataset(Dataset):
     def __init__(self, root, n_points=8192):
         self.root = Path.cwd()
+        self.root=self.root/"dataset"
         self.n_points = n_points
 
         self.samples = sorted([
@@ -87,7 +88,7 @@ class LightcurveEncoder(nn.Module):
         super().__init__()
 
         self.net = nn.Sequential(
-            nn.Conv1d(num_cameras, 64, kernel_size=7, padding=3),
+            nn.Conv1d(num_cameras, 64, kernel_size=7, padding=3),       #cameras as input channels
             nn.SiLU(),
 
             nn.Conv1d(64, 128, kernel_size=7, padding=3),
@@ -96,10 +97,10 @@ class LightcurveEncoder(nn.Module):
             nn.Conv1d(128, 256, kernel_size=7, padding=3),
             nn.SiLU(),
 
-            nn.AdaptiveAvgPool1d(1),
+            nn.AdaptiveAvgPool1d(1),                                    #pooling for global curve descriptor
             nn.Flatten(),
 
-            nn.Linear(256, latent_dim),
+            nn.Linear(256, latent_dim),                                 #produce latent code
             nn.SiLU()
         )
 
@@ -268,11 +269,11 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 dataset = AsteroidSDFPointDataset("dataset", n_points=8192)
 loader = DataLoader(dataset, batch_size=8, shuffle=True)
 
-commence=1
+commence=0
 if commence==1:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    checkpoint = torch.load("checkpoint.pth", map_location=device)
+    checkpoint = torch.load("checkpoint1800_sdf.pth", map_location=device)
 
     model = LightcurveSDFNet(
         num_cameras=checkpoint["num_cameras"],
@@ -300,7 +301,7 @@ else:
 loss_fn = nn.SmoothL1Loss()
 
 
-for epoch in range(start_epoch, start_epoch+0):
+for epoch in range(start_epoch, start_epoch+1000):
     model.train()
     total_loss = 0
 
@@ -324,28 +325,29 @@ for epoch in range(start_epoch, start_epoch+0):
     # print("sdf target min/max:", sdf.min().item(), sdf.max().item())
     # print("pred min/max:", pred_sdf.min().item(), pred_sdf.max().item())
 
-
-    torch.save({
-        "epoch": epoch,
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "loss": total_loss / len(loader),
-        "num_cameras": 28,
-        "latent_dim": 256,
-        "R_max": R_max
-    }, "checkpoint.pth")
+    if epoch%100==0:
+        torch.save({
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "loss": total_loss / len(loader),
+            "num_cameras": 28,
+            "latent_dim": 256,
+            "R_max": R_max
+        }, f"checkpoint{epoch}_sdf.pth")
+        print("Checkpoint saved!")
     
-    print(f"Epoch {epoch}: loss = {total_loss / len(loader):.4f}")
     end2 = time.time()
     length = end2 - start2
 
-    # Show the results : this can be altered however you like
-    print("It took", length, "seconds!")
+    print(f"Epoch {epoch}: loss = {total_loss / len(loader):.4f},",length, "seconds!")
+    with open("losses.txt", "a") as myfile:
+        myfile.write(f"Epoch: {epoch} Loss: {total_loss / len(loader):.4f} \n")
     start2=end2
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-checkpoint = torch.load("checkpoint.pth", map_location=device)
+checkpoint = torch.load("checkpoint1800_sdf.pth", map_location=device)
 
 model = LightcurveSDFNet(
     num_cameras=checkpoint["num_cameras"],
@@ -358,9 +360,9 @@ optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
 root=Path.cwd()
-lc = load_lightcurve(root/"brightnessasteroid5radius2.0475867806576935.stl.csv")
+lc = load_lightcurve(root/"brightnessasteroid3_scaled_radius0.8782467278262304.stl.csv")
 lc = torch.tensor(lc.T, dtype=torch.float32).unsqueeze(0).to(device)
-radius_value = 2.0475867806576935
+radius_value = 0.8782467278262304
 
 radius_model = torch.tensor([radius_value / R_max], dtype=torch.float32, device=device)
 
