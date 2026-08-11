@@ -11,11 +11,16 @@ import re
 import os
 import time
 import torch.nn.functional as F
+from lightcurve_fips.data.lightcurves import load_lightcurve
+from lightcurve_fips.training.utils import parse_radius_from_stl
+
+R_max = 5.313693321295838
 
 class AsteroidSDFPointDataset(Dataset):
     def __init__(self, root, n_points=8192):
-        self.root = Path.cwd()
-        self.root=self.root/"dataset"
+        PROJECT_ROOT = Path(__file__).resolve().parents[3]
+        DATASET_ROOT = PROJECT_ROOT / root
+        self.root = DATASET_ROOT
         self.n_points = n_points
 
         self.samples = sorted([

@@ -4,3 +4,7 @@ data/dataset2/
 src/lightcurve_fips/working models/
 diffusionnet_cache
 checkpoints/
+
+*.egg-info
+
+__pycache__/

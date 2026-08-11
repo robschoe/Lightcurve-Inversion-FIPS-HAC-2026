@@ -11,6 +11,7 @@ import re
 import os
 import time
 import torch.nn.functional as F
+from lightcurve_fips.models.sdf_decoder import SDFDecoder
 
 class LightcurveEncoder(nn.Module):
     def __init__(self, num_cameras, latent_dim=256):

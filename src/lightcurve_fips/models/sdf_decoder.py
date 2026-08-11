@@ -11,6 +11,7 @@ import re
 import os
 import time
 import torch.nn.functional as F
+from lightcurve_fips.training.utils import positional_encoding
 
 class SDFDecoder(nn.Module):
     def __init__(self, latent_dim=256, num_freqs=6):

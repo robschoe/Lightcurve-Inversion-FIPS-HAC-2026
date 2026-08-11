@@ -11,6 +11,8 @@ import re
 import os
 import time
 import torch.nn.functional as F
+from lightcurve_fips.data.datasets import AsteroidSDFPointDataset
+from lightcurve_fips.models.lightcurve_encoder import LightcurveSDFNet
 
 start = time.time()
 start2=start
@@ -18,8 +20,7 @@ start2=start
 R_max = 5.313693321295838
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-
-dataset = AsteroidSDFPointDataset("dataset", n_points=8192)
+dataset = AsteroidSDFPointDataset("data/dataset2", n_points=8192)
 loader = DataLoader(dataset, batch_size=8, shuffle=True)
 
 commence=0
@@ -73,9 +74,6 @@ for epoch in range(start_epoch, start_epoch+1000):
         loss.backward()
         optimizer.step()
         total_loss += loss.item()
-    
-    # print("sdf target min/max:", sdf.min().item(), sdf.max().item())
-    # print("pred min/max:", pred_sdf.min().item(), pred_sdf.max().item())
 
     if epoch%100==0:
         torch.save({
@@ -86,13 +84,13 @@ for epoch in range(start_epoch, start_epoch+1000):
             "num_cameras": 28,
             "latent_dim": 256,
             "R_max": R_max
-        }, f"checkpoint{epoch}_sdf.pth")
+        }, f"checkpoints/sdf/checkpoint{epoch}_sdf.pth")
         print("Checkpoint saved!")
     
     end2 = time.time()
     length = end2 - start2
 
     print(f"Epoch {epoch}: loss = {total_loss / len(loader):.6f},",length, "seconds!")
-    with open("losses.txt", "a") as myfile:
+    with open("checkpoints/sdf/losses.txt", "a") as myfile:
         myfile.write(f"Epoch: {epoch} Loss: {total_loss / len(loader):.6f} \n")
     start2=end2
