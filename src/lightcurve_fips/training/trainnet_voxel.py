@@ -10,9 +10,6 @@ from torch.utils.data import DataLoader
 from skimage import measure
 import re
 import os
-import time
-
-start = time.time()
 
 R_max = 5.313693321295838
 
@@ -130,35 +127,32 @@ def cylinder_mask(resolution, radius, device):
 
     return mask.float()
 
-def load_lightcurve(csv_path):
-    data = pd.read_csv(csv_path, header=None)
 
-    values = data.values.astype(np.float32)
 
-    # Falls erste Spalte Framezahl ist:
-    values = values[:, 1:]
-
-    values = values / (values.mean(axis=0, keepdims=True) + 1e-8)
-
-    return values
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 dataset = AsteroidDataset("dataset", resolution=64)
 loader = DataLoader(dataset, batch_size=8, shuffle=True)
 
-# Beispielwerte anpassen
-num_cameras = 28
-frames = 360
-resolution = 64
+checkpoint = torch.load("checkpoint.pth", map_location=device)
+
+num_cameras = checkpoint["num_cameras"]
+frames = checkpoint["frames"]
+resolution = checkpoint["resolution"]
+R_max = checkpoint["R_max"]
 
 model = LightcurveToVoxelNet(num_cameras, frames, resolution).to(device)
+model.load_state_dict(checkpoint["model_state_dict"])
 
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+start_epoch = checkpoint["epoch"] +1
 
 loss_fn = nn.BCEWithLogitsLoss()
 
-for epoch in range(2):
+for epoch in range(start_epoch, start_epoch+50):
     print(epoch)
     total_loss = 0
 
@@ -185,6 +179,8 @@ for epoch in range(2):
 
         total_loss += loss.item()
 
+    print(f"Epoch {epoch}: loss = {total_loss / len(loader):.4f}")
+    
     torch.save({
         "epoch": epoch,
         "model_state_dict": model.state_dict(),
@@ -196,38 +192,13 @@ for epoch in range(2):
         "R_max": R_max
     }, "checkpoint.pth")
 
-    print(f"Epoch {epoch}: loss = {total_loss / len(loader):.4f}")
 
-def voxels_to_stl(voxels, out_path, threshold=0.5, R_max=5.313693321295838):
-    verts, faces, normals, values = measure.marching_cubes(voxels, level=threshold)
-
-    res = voxels.shape[0]
-
-    # Indexraum -> echter Koordinatenraum
-    verts[:,0] = verts[:,0] / (res - 1) * (2 * R_max) - R_max
-    verts[:,1] = verts[:,1] / (res - 1) * (2 * R_max) - R_max
-    verts[:,2] = verts[:,2] / (res - 1) * 2.0 - 1.0
-
-    mesh = trimesh.Trimesh(vertices=verts, faces=faces)
-    mesh.export(out_path)
 
 model.eval()
 
-# checkpoint = torch.load("checkpoint.pth", map_location=device)
-
-# model = LightcurveToVoxelNet(
-#     num_cameras=checkpoint["num_cameras"],
-#     frames=checkpoint["frames"],
-#     resolution=checkpoint["resolution"]
-# ).to(device)
-
-# model.load_state_dict(checkpoint["model_state_dict"])
-# model.eval()
-# R_max = checkpoint["R_max"]
-
-lc = load_lightcurve("C:/Users/rober/Python Datengenerierung/brightnessasteroid5radius2.0475867806576935.stl.csv")
+lc = load_lightcurve("C:/Users/rober/Python Datengenerierung/brightnessasteroid52radius0.583516496508435.stl.csv")
 lc = torch.tensor(lc.T, dtype=torch.float32).unsqueeze(0).to(device)
-radius = torch.tensor([2.0475867806576935], dtype=torch.float32, device=device)
+radius = torch.tensor([0.583516496508435], dtype=torch.float32, device=device)
 
 with torch.no_grad():
     pred = model(lc,radius)
@@ -238,10 +209,4 @@ with torch.no_grad():
 
 voxels = pred[0].cpu().numpy()
 
-voxels_to_stl(voxels, "predicted_asteroid_alternative.stl", threshold=0.5)
-
-end = time.time()
-length = end - start
-
-# Show the results : this can be altered however you like
-print("It took", length, "seconds!")
+voxels_to_stl(voxels, "predicted_asteroid.stl", threshold=0.5)

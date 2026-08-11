@@ -50,10 +50,3 @@ def normalize_mesh_height_and_get_radius(stl_in, stl_out=None):
         mesh_scaled.export(stl_out)
 
     return mesh_scaled, R
-
-# Beispiel:
-in_path = "asteroid3.stl"
-out_path = f"asteroid3_scaled_radius.stl"
-mesh_scaled, R = normalize_mesh_height_and_get_radius(in_path, out_path)
-print("Skalierte STL gespeichert:", out_path)
-print("Berechneter Bounding‑Cylinder Radius R =", R)

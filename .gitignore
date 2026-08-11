@@ -1,6 +1,6 @@
-dataset/
-damit-20260705T000301Z/
 .venv
-data/
-working models/
-dataset2/
+data/dataset/
+data/dataset2/
+src/lightcurve_fips/working models/
+diffusionnet_cache
+checkpoints/
