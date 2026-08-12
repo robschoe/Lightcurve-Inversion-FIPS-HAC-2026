@@ -65,7 +65,9 @@ class AsteroidSDFPointDataset(Dataset):
 
 class AsteroidDataset(Dataset):
     def __init__(self, root, resolution=32):
-        self.root = Path("C:/Users/rober/Python Datengenerierung/dataset")
+        PROJECT_ROOT = Path(__file__).resolve().parents[3]
+        DATASET_ROOT = PROJECT_ROOT / root
+        self.root = DATASET_ROOT
         self.resolution = resolution
 
         self.samples = sorted([

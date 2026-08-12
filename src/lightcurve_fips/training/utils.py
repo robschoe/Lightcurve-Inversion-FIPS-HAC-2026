@@ -12,6 +12,8 @@ import os
 import time
 import torch.nn.functional as F
 
+R_max = 5.313693321295838
+
 def parse_radius_from_stl(stl_path):
     m = re.search(r"radius([0-9]+(?:\.[0-9]+)?)", stl_path.name)
 
@@ -193,10 +195,6 @@ def stl_to_sdf_grid(stl_path, radius, resolution=128, tau=0.1):
     )
 
     sdf = signed_distance_chunked(mesh, points)
-
-    # optional: Vorzeichen prüfen!
-    # falls innen positiv und du innen negativ möchtest:
-    # sdf = -sdf
 
     sdf = np.clip(sdf, -tau, tau)
     sdf = sdf / tau

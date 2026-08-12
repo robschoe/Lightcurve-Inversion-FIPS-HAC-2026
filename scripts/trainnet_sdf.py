@@ -75,7 +75,7 @@ for epoch in range(start_epoch, start_epoch+1000):
         optimizer.step()
         total_loss += loss.item()
 
-    if epoch%100==0:
+    if epoch%10==0:
         torch.save({
             "epoch": epoch,
             "model_state_dict": model.state_dict(),
