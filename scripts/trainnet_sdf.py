@@ -23,11 +23,12 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 dataset = AsteroidSDFPointDataset("data/dataset2", n_points=8192)
 loader = DataLoader(dataset, batch_size=8, shuffle=True)
 
-commence=0
+commence=1
 if commence==1:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    checkpoint = torch.load("checkpoint1800_sdf.pth", map_location=device)
+    PROJECT_ROOT = Path(__file__).resolve().parents[1]
+    checkpoint = torch.load(PROJECT_ROOT/"checkpoints/sdf/checkpoint5000_sdf.pth", map_location=device)
 
     model = LightcurveSDFNet(
         num_cameras=checkpoint["num_cameras"],
