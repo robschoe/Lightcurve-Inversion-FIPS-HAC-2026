@@ -100,27 +100,3 @@ def points_to_convex_stl(points, out_path):
     hull = pcloud.convex_hull  # returns a trimesh.Trimesh
     hull.export(out_path)
     return hull
-
-for h in range(4):
-    for g in range(1000):
-        root=Path.cwd()
-        root1 = root/f"dataset2/test/batch{h+5}/sample{g}"
-        root1.mkdir(exist_ok=True)
-        root2=root/f"dataset2/test/batch{h+1}/sample{g}"
-        files = list(root2.rglob("asteroid*.stl"))
-        m = trimesh.load(root2/f"{os.path.basename(files[0])}")
-        m2 = add_noise_and_craters(m, noise_amp=0.03, noise_scale=0.1, n_craters=500, crater_max_radius=0.25, crater_max_depth=0.15)
-        m2.export(root1/f"{os.path.basename(files[0])}")
-        print("folder:"+str(h)+"sample:"+str(g))
-
-# for g in range (1000):
-#     root=Path.cwd()
-#     root = root/f"dataset2/test/batch{2}/sample{g}"
-#     root.mkdir(exist_ok=True)
-
-#     R = random.rand()*4.9 +0.1
-#     pts = sample_points_in_cylinder(2+(g//10), R)
-
-#     hull = points_to_convex_stl(pts, root / f"asteroid{g}radius{R}.stl")
-#     print("STL gespeichert:", (root / f"asteroid{g}radius{R}.stl").absolute())
-#     print("Hull bounds z min/max:", hull.bounds[:,2])

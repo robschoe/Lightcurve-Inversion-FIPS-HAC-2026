@@ -1,19 +1,5 @@
-import math
 import numpy as np
-import matplotlib.pyplot as plt
-from PIL import Image
-import glob
-import imageio
-import random
-import math
-import alphashape
-import trimesh
-import torch
 from scipy.signal import savgol_filter
-from pathlib import Path
-import os
-import time
-import bpy
 
 def angle_to_mode(angle):
     match angle:
@@ -35,11 +21,7 @@ def create_camera(name, angle, mode):
     x=r*np.cos(anglexy)*np.sin(anglez)
     y=r*np.sin(anglexy)*np.sin(anglez)
     z=r*np.cos(anglez)
-    bpy.ops.object.camera_add(location=(x,y,z))
-    cam = bpy.context.object
-    cam.name = name
+
+    pos = np.array([x, y, z], dtype=np.float32)
     
-    direction = - cam.location
-    cam.rotation_euler = direction.to_track_quat('-Z','Y').to_euler()
-    
-    return cam
+    return pos
