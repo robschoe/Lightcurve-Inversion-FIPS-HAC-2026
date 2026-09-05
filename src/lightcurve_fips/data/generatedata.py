@@ -7,45 +7,13 @@ import torch
 import re
 
 def sample_sdf_from_mesh(stl_path, radius, n_points=8192, tau=0.1):
-    mesh = trimesh.load(stl_path)                                       #load mesh
+    mesh = load_normalized_mesh(stl_path, radius)
 
-    if isinstance(mesh, trimesh.Scene):
-        mesh = trimesh.util.concatenate(list(mesh.geometry.values()))
-    mesh = clean_mesh(mesh)
-
-    if len(mesh.vertices) == 0 or len(mesh.faces) == 0:
-        raise ValueError(f"Mesh enthält nach Bereinigung keine gültige Geometrie: {stl_path}")
-
-    if not np.isfinite(radius) or radius <= 0:
-        raise ValueError(f"Ungültiger Radius {radius} für {stl_path}")
-
-    mesh.vertices[:,0] /= radius                                        #scale coordinates
-    mesh.vertices[:,1] /= radius
-
-    n_surface = int(0.7 * n_points)                                     #70% of generated points near surface
-    n_uniform = n_points - n_surface                                    #30% uniformly distributed in [-1,1]³
-
-    surface_points = mesh.sample(n_surface)                             #sample surface points
-    near_surface = surface_points + np.random.normal(scale=0.03, size=surface_points.shape)     #add noise
-    uniform = np.random.uniform(-1, 1, size=(n_uniform, 3))             #sample uniform points
-
-    points = np.concatenate([near_surface, uniform], axis=0)
-    points = np.clip(points, -1, 1)                                     #respect bounding cylinder
-
-    sdf = trimesh.proximity.signed_distance(mesh, points)               #calculate sdf for each point
-
-    if not np.all(np.isfinite(sdf)):
-        invalid = ~np.isfinite(sdf)
-
-        print(f"Warnung: {invalid.sum()} ungültige SDF-Werte in {stl_path}")
-
-        # Diese Punkte neu sampeln oder zunächst mit tau ersetzen.
-        # Besser wäre Neu-Sampling, aber das verhindert kaputte NPY-Dateien.
-        sdf[invalid] = tau
-        
-    sdf = np.clip(sdf, -tau, tau)                                       #truncate since surface is to be learned
-    sdf = sdf / tau                                                     #normalize sdf
-    return points.astype(np.float32), sdf.astype(np.float32)
+    return sample_sdf_from_loaded_mesh(
+        mesh,
+        n_points=n_points,
+        tau=tau
+    )
 
 def stl_to_voxels_boundary(
     stl_path,
@@ -135,3 +103,145 @@ def clean_mesh(mesh, area_epsilon=1e-12):
         pass
 
     return mesh
+
+def load_normalized_mesh(stl_path, radius):
+    mesh = trimesh.load(stl_path, force="mesh")
+
+    if isinstance(mesh, trimesh.Scene):
+        mesh = trimesh.util.concatenate(
+            list(mesh.geometry.values())
+        )
+
+    mesh = clean_mesh(mesh)
+
+    if len(mesh.vertices) == 0 or len(mesh.faces) == 0:
+        raise ValueError(
+            f"Mesh enthält nach Bereinigung keine gültige Geometrie: {stl_path}"
+        )
+
+    if not np.isfinite(radius) or radius <= 0:
+        raise ValueError(f"Ungültiger Radius {radius} für {stl_path}")
+
+    mesh.vertices[:, 0] /= radius
+    mesh.vertices[:, 1] /= radius
+
+    return mesh
+
+def sample_sdf_from_loaded_mesh(
+    mesh,
+    n_points=8192,
+    tau=0.1,
+    query=None
+):
+    n_surface = int(0.7 * n_points)
+    n_uniform = n_points - n_surface
+
+    surface_points = mesh.sample(n_surface)
+
+    near_surface = surface_points + np.random.normal(
+        loc=0.0,
+        scale=0.03,
+        size=surface_points.shape
+    )
+
+    uniform = np.random.uniform(
+        low=-1.0,
+        high=1.0,
+        size=(n_uniform, 3)
+    )
+
+    points = np.concatenate([near_surface, uniform], axis=0)
+    points = np.clip(points, -1.0, 1.0)
+
+    if query is None:
+        query = trimesh.proximity.ProximityQuery(mesh)
+
+    sdf = query.signed_distance(points)
+
+    invalid = ~np.isfinite(sdf)
+
+    if invalid.any():
+        sdf[invalid] = tau
+
+    sdf = np.clip(sdf, -tau, tau)
+    sdf = sdf / tau
+
+    return points.astype(np.float32), sdf.astype(np.float32)
+
+def sample_multiple_sdf_sets_from_loaded_mesh(
+    mesh,
+    n_sets,
+    n_points=8192,
+    tau=0.1,
+    query=None
+):
+    if query is None:
+        query = trimesh.proximity.ProximityQuery(mesh)
+
+    n_surface = int(0.7 * n_points)
+    n_uniform = n_points - n_surface
+
+    all_points = []
+
+    for _ in range(n_sets):
+        surface_points = mesh.sample(n_surface)
+
+        near_surface = surface_points + np.random.normal(
+            scale=0.03,
+            size=surface_points.shape
+        )
+
+        uniform = np.random.uniform(
+            -1.0,
+            1.0,
+            size=(n_uniform, 3)
+        )
+
+        points = np.concatenate(
+            [near_surface, uniform],
+            axis=0
+        )
+
+        points = np.clip(points, -1.0, 1.0)
+
+        all_points.append(points)
+
+    all_points = np.stack(all_points, axis=0)
+
+    flat_points = all_points.reshape(-1, 3)
+
+    flat_sdf = flat_sdf = signed_distance_chunked(
+        query,
+        flat_points,
+        chunk_size=16384
+    )
+
+    invalid = ~np.isfinite(flat_sdf)
+
+    if invalid.any():
+        print(f"Warning: {invalid.sum()} invalid SDF values")
+        flat_sdf[invalid] = tau
+
+    flat_sdf = np.clip(flat_sdf, -tau, tau) / tau
+
+    all_sdf = flat_sdf.reshape(n_sets, n_points)
+
+    return (
+        all_points.astype(np.float32),
+        all_sdf.astype(np.float32)
+    )
+
+def signed_distance_chunked(query, points, chunk_size=16384):
+    result = np.empty(
+        len(points),
+        dtype=np.float64
+    )
+
+    for start in range(0, len(points), chunk_size):
+        end = min(start + chunk_size, len(points))
+
+        result[start:end] = query.signed_distance(
+            points[start:end]
+        )
+
+    return result

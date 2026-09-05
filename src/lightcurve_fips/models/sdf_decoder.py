@@ -38,12 +38,6 @@ class SDFDecoder(nn.Module):
         )
 
     def forward(self, latent, points, radius):
-        """
-        latent: (B, latent_dim)
-        points: (B, N, 3)
-        radius: (B,)
-        """
-
         B, N, _ = points.shape
 
         if radius.dim() == 0:
@@ -77,7 +71,6 @@ class SDFDecoder2(nn.Module):
         self.fc1 = nn.Linear(input_dim, 512)
         self.fc2 = nn.Linear(512, 512)
 
-        # Hier wird der originale Input erneut angehängt:
         self.fc3 = nn.Linear(512 + input_dim, 512)
 
         self.fc4 = nn.Linear(512, 256)
@@ -113,3 +106,67 @@ class SDFDecoder2(nn.Module):
         sdf = self.out(h)
 
         return sdf.squeeze(-1)
+
+class FiLMSDFDecoder(nn.Module):
+    def __init__(self, latent_dim=256, num_freqs=6, hidden_dim=512):
+        super().__init__()
+
+        self.num_freqs = num_freqs
+
+        point_dim = 3 + 2 * num_freqs * 3
+        input_dim = point_dim + 1
+
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc4 = nn.Linear(hidden_dim, hidden_dim)
+
+        self.out = nn.Linear(hidden_dim, 1)
+
+        self.film1 = nn.Linear(latent_dim, 2 * hidden_dim)
+        self.film2 = nn.Linear(latent_dim, 2 * hidden_dim)
+        self.film3 = nn.Linear(latent_dim, 2 * hidden_dim)
+        self.film4 = nn.Linear(latent_dim, 2 * hidden_dim)
+
+        self.act = nn.SiLU()
+
+    def apply_film(self, x, latent, film_layer):
+        gamma_beta = film_layer(latent)
+
+        gamma, beta = torch.chunk(
+            gamma_beta,
+            chunks=2,
+            dim=-1
+        )
+
+        gamma = gamma[:, None, :]
+        beta = beta[:, None, :]
+
+        return gamma * x + beta
+
+    def forward(self, latent, points, radius):
+        B, N, _ = points.shape
+
+        points_enc = positional_encoding(points, self.num_freqs)
+
+        radius = radius.view(B, 1, 1).expand(-1, N, 1)
+
+        x = torch.cat([points_enc, radius], dim=-1)
+
+        h = self.fc1(x)
+        h = self.apply_film(h, latent, self.film1)
+        h = self.act(h)
+
+        h = self.fc2(h)
+        h = self.apply_film(h, latent, self.film2)
+        h = self.act(h)
+
+        h = self.fc3(h)
+        h = self.apply_film(h, latent, self.film3)
+        h = self.act(h)
+
+        h = self.fc4(h)
+        h = self.apply_film(h, latent, self.film4)
+        h = self.act(h)
+
+        return self.out(h).squeeze(-1)

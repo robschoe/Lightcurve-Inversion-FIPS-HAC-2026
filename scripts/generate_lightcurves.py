@@ -77,17 +77,14 @@ camera_pos = torch.tensor(
 
 num_cameras = camera_pos.shape[0]
 
-# Blickrichtung: Ursprung -> Kamera
 views = F.normalize(camera_pos, dim=1)  # (C, 3)
 
-# Standard-Up-Vektor
 up = torch.tensor(
     [0.0, 0.0, 1.0],
     dtype=torch.float32,
     device=device
 ).expand(num_cameras, -1).clone()
 
-# Falls view fast parallel zu z ist, alternativen Up-Vektor wählen
 parallel_mask = torch.abs(torch.sum(views * up, dim=1)) > 0.95
 
 up[parallel_mask] = torch.tensor(
@@ -96,7 +93,6 @@ up[parallel_mask] = torch.tensor(
     device=device
 )
 
-# Lokale Kameraachsen
 x_axes = F.normalize(
     torch.cross(views, up, dim=1),
     dim=1
@@ -173,25 +169,19 @@ for index in range(10):
                 cy = (rotated_centers @ y_axes.T).T
                 cz = (rotated_centers @ views.T).T
 
-                # Sichtfaktor aller Faces für alle Kameras:
-                # Ergebnis: (C, F)
                 vis = torch.clamp(
                     (rotated_normals @ views.T).T,
                     min=0.0
                 )
 
-                # illum: (F,)
-                # Zu (C, F) erweitern
                 illum_all = illum.unsqueeze(0)
 
-                # Normierung in Pixelkoordinaten, jeweils pro Kamera
                 cx_min = cx.min(dim=1, keepdim=True).values
                 cx_max = cx.max(dim=1, keepdim=True).values
 
                 cy_min = cy.min(dim=1, keepdim=True).values
                 cy_max = cy.max(dim=1, keepdim=True).values
 
-                # Schutz gegen Division durch 0
                 cx_range = (cx_max - cx_min).clamp_min(1e-8)
                 cy_range = (cy_max - cy_min).clamp_min(1e-8)
 
@@ -201,15 +191,8 @@ for index in range(10):
                 px = torch.clamp(px, 0, W - 1)
                 py = torch.clamp(py, 0, H - 1)
 
-                # (C, F): Jeder Face-Mittelpunkt erhält pro Kamera einen Pixelindex
                 flat_index = py * W + px
 
-                # ------------------------------------------------------------
-                # Batched Z-Buffer für alle Kameras
-                # ------------------------------------------------------------
-
-                # Da bei deiner view-Definition größere cz-Werte näher an der
-                # Kamera liegen sollten, verwenden wir amax.
                 zbuf = torch.full(
                     (num_cameras, num_pixels),
                     -float("inf"),
@@ -226,10 +209,6 @@ for index in range(10):
                 )
 
                 visible_mask = cz == zbuf.gather(1, flat_index)
-
-                # ------------------------------------------------------------
-                # Helligkeit pro Kamera
-                # ------------------------------------------------------------
 
                 brightness_per_camera = torch.sum(
                     areas.unsqueeze(0) *

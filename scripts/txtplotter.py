@@ -3,10 +3,14 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from pathlib import Path
 
-#data1 = np.loadtxt("brightnessasteroid5radius2.0475867806576935.stl.csv", delimiter=",")
-data = np.loadtxt("brightnessasteroid3.stl.csv", delimiter=",", skiprows=1)
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DATASET_DIR = PROJECT_ROOT / "data" / "publicasteroids" / "unchanged"
+DATASET_DIR.mkdir(parents=True, exist_ok=True)
 
-camsel=20
+#data1 = np.loadtxt("brightnessasteroid5radius2.0475867806576935.stl.csv", delimiter=",")
+data = np.loadtxt(DATASET_DIR/"brightnessasteroid1.stl.csv", delimiter=",", skiprows=1)
+
+camsel=25
 
 cam1 = data[:,camsel]
 
@@ -20,7 +24,7 @@ plt.xlabel("Frame")
 plt.ylabel("Brightness")
 plt.title(f"Lightcurve Camera {camsel}")
 
-data2 = np.loadtxt("Asteroid03_lightcurve_intensity_blender.txt", delimiter=",")
+data2 = np.loadtxt(DATASET_DIR/"Asteroid01_lightcurve_intensity_blender.txt", delimiter=",", skiprows=1)
 
 frames = data2[:,0]
 cam2 = data2[:,camsel]
@@ -151,39 +155,37 @@ def compare_curves(y1, y2):
 
     return rmse, mae, corr, nrmse
 
-root=Path.cwd()
-file_a = root/r"brightnessasteroid3.stl.csv"
-file_b = root/r"Asteroid03_lightcurve_intensity_blender.txt"
+# root=Path.cwd()
+# file_a = root/r"brightnessasteroid3.stl.csv"
+# file_b = root/r"Asteroid03_lightcurve_intensity_blender.txt"
 
-df_a = load_brightness_file(file_a)
-df_b = load_brightness_file(file_b)
+# df_a = load_brightness_file(file_a)
+# df_b = load_brightness_file(file_b)
 
-# Nach Frame-Nummer zusammenführen
-df = pd.merge(df_a, df_b, on="frame", suffixes=("_a", "_b"))
+# # Nach Frame-Nummer zusammenführen
+# df = pd.merge(df_a, df_b, on="frame", suffixes=("_a", "_b"))
 
-results = []
+# results = []
 
-for cam in [f"cam_{i:02d}" for i in range(1, 29)]:
-    y_a = df[f"{cam}_a"].values
-    y_b = df[f"{cam}_b"].values
+# for cam in [f"cam_{i:02d}" for i in range(1, 29)]:
+#     y_a = df[f"{cam}_a"].values
+#     y_b = df[f"{cam}_b"].values
 
-    rmse, mae, corr, nrmse = compare_curves(y_a, y_b)
+#     rmse, mae, corr, nrmse = compare_curves(y_a, y_b)
 
-    results.append({
-        "camera": cam,
-        "RMSE": rmse,
-        "MAE": mae,
-        "Correlation": corr,
-        "NRMSE": nrmse
-    })
+#     results.append({
+#         "camera": cam,
+#         "RMSE": rmse,
+#         "MAE": mae,
+#         "Correlation": corr,
+#         "NRMSE": nrmse
+#     })
 
-results_df = pd.DataFrame(results)
+# results_df = pd.DataFrame(results)
 
-print(results_df)
+# print(results_df)
 
-# Durchschnitt über alle Kameras
-print("\nMittelwerte:")
-print(results_df[["RMSE", "MAE", "Correlation", "NRMSE"]].mean())
+# print("\nMittelwerte:")
+# print(results_df[["RMSE", "MAE", "Correlation", "NRMSE"]].mean())
 
-# Optional speichern
-results_df.to_csv("vergleich_ergebnisse.csv", index=False)
+# results_df.to_csv("vergleich_ergebnisse.csv", index=False)

@@ -23,12 +23,12 @@ CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-checkpoint = torch.load(CHECKPOINT_DIR/"checkpoint6400_sdf.pth", map_location=device)
+checkpoint = torch.load(CHECKPOINT_DIR/"best_by_voxel_score_sdf_combined.pth", map_location=device)
 
 R_max = 5.313693321295838
 
 model = LightcurveSDFNet(
-    num_cameras=checkpoint["num_cameras"],
+    num_cameras=21,
     latent_dim=checkpoint["latent_dim"]
 ).to(device)
 
@@ -37,11 +37,21 @@ model.eval()
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
-asteroid="data/dataset2/test/brightnessasteroid2_scaled_radius1.4142135623730951.stl.csv"
-lc = load_lightcurve(PROJECT_ROOT/asteroid)
-lc = torch.tensor(lc.T, dtype=torch.float32).unsqueeze(0).to(device)
-m = re.search(r"radius([0-9]+(?:\.[0-9]+)?)", asteroid)
-radius_value = float(m.group(1))
+asteroid="data/publicasteroids/Asteroid02_lightcurve_binary_blender.txt"
+lc_bin = load_lightcurve(PROJECT_ROOT/asteroid)
+asteroid="data/publicasteroids/Asteroid02_lightcurve_intensity_blender.txt"
+lc_intens = load_lightcurve(PROJECT_ROOT/asteroid)
+# m = re.search(r"radius([0-9]+(?:\.[0-9]+)?)", asteroid)
+# radius_value = float(m.group(1))
+lc = np.stack([lc_bin, lc_intens], axis=0)
+
+lc = np.transpose(lc, (0, 2, 1))
+
+lc = torch.tensor(lc, dtype=torch.float32,device=device)
+
+lc = lc.unsqueeze(0)
+
+radius_value=0.88
 
 radius_model = torch.tensor([radius_value / R_max], dtype=torch.float32, device=device)
 

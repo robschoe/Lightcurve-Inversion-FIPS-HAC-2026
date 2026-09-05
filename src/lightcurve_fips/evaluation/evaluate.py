@@ -4,6 +4,13 @@ import trimesh
 import pymeshfix
 from scipy.ndimage import binary_erosion, distance_transform_edt
 from pathlib import Path
+import re
+import tempfile
+import numpy as np
+import torch
+
+from lightcurve_fips.data.lightcurves import load_lightcurve
+from lightcurve_fips.training.utils import reconstruct_sdf, sdf_to_stl
 
 
 def load_mesh(path):
@@ -40,17 +47,6 @@ def load_mesh(path):
 
 
 def normalize_mesh_to_unit_box(mesh, per_axis=False):
-    """
-    Normalisiert ein Mesh in eine gemeinsame Bounding Box.
-
-    per_axis=False:
-        Einheitliche Skalierung mit größter Ausdehnung.
-        Seitenverhältnisse bleiben erhalten.
-
-    per_axis=True:
-        Jede Achse wird separat nach [-0.5, 0.5] skaliert.
-        Das Mesh füllt die Box exakt, aber Proportionen können verändert werden.
-    """
     mesh = mesh.copy()
 
     bounds = mesh.bounds
@@ -75,10 +71,6 @@ def normalize_mesh_to_unit_box(mesh, per_axis=False):
 
 
 def contains_points_chunked(mesh, points, chunk_size=200_000):
-    """
-    Prüft punktweise, ob Punkte innerhalb des Meshes liegen.
-    Chunking verhindert zu hohen Speicherverbrauch.
-    """
     inside = np.zeros(len(points), dtype=bool)
 
     for start in range(0, len(points), chunk_size):
@@ -89,11 +81,6 @@ def contains_points_chunked(mesh, points, chunk_size=200_000):
 
 
 def voxelize_by_contains(mesh, resolution=128):
-    """
-    Erzeugt ein boolesches Voxelgitter.
-    True bedeutet: Voxelzentrum liegt innerhalb des Meshes.
-    """
-    # Voxelzentren in [-0.5, 0.5]^3
     lin = np.linspace(
         -0.5 + 0.5 / resolution,
          0.5 - 0.5 / resolution,
@@ -111,15 +98,6 @@ def voxelize_by_contains(mesh, resolution=128):
 
 
 def voxel_similarity(A, B):
-    """
-    Voxel-basiertes Maß:
-
-    score = 1 - (#(A\\B) + #(B\\A)) / (#A + #B)
-
-    Das entspricht dem Dice Score:
-
-    score = 2 * #(A ∩ B) / (#A + #B)
-    """
     A = A.astype(bool)
     B = B.astype(bool)
 
@@ -147,9 +125,6 @@ def voxel_similarity(A, B):
 
 
 def voxel_centers_from_mask(mask, lin):
-    """
-    Wandelt ein Voxelgitter in die 3D-Koordinaten der belegten Voxelzentren um.
-    """
     idx = np.argwhere(mask)
 
     if len(idx) == 0:
@@ -173,9 +148,6 @@ def normalize(v):
 
 
 def projection_basis(view_dir):
-    """
-    Erzeugt zwei orthogonale Achsen u, v senkrecht zur Blickrichtung.
-    """
     view_dir = normalize(view_dir)
 
     up = np.array([0.0, 0.0, 1.0])
@@ -192,23 +164,15 @@ def projection_basis(view_dir):
     return u, v
 
 def voxelize_by_trimesh_fill(mesh, resolution=128):
-    """
-    Schnellere Voxelisierung über trimesh.voxelized(...).fill().
-    Gibt ein boolesches Voxelgitter der Form (resolution, resolution, resolution) zurück.
-    Erwartet, dass das Mesh ungefähr in [-0.5, 0.5]^3 liegt.
-    """
     pitch = 1.0 / resolution
 
-    # Oberfläche voxelisieren
     voxel_grid = mesh.voxelized(pitch)
 
-    # Innenraum füllen, falls möglich
     try:
         voxel_grid = voxel_grid.fill()
     except Exception as e:
         print("Warnung: voxel_grid.fill() fehlgeschlagen:", e)
 
-    # Zentren belegter Voxel
     points = voxel_grid.points
 
     voxels = np.zeros((resolution, resolution, resolution), dtype=bool)
@@ -221,7 +185,6 @@ def voxelize_by_trimesh_fill(mesh, resolution=128):
         )
         return voxels, lin
 
-    # Punkte nach [-0.5, 0.5]^3-Gitter mappen
     idx = np.floor((points + 0.5) * resolution).astype(int)
 
     valid = (
@@ -243,9 +206,6 @@ def voxelize_by_trimesh_fill(mesh, resolution=128):
     return voxels, lin
 
 def project_points_to_mask(points_A, points_B, view_dir, image_res=256):
-    """
-    Projiziert zwei 3D-Punktmengen entlang view_dir in dasselbe 2D-Bild.
-    """
     u, v = projection_basis(view_dir)
 
     def project(points):
@@ -267,7 +227,6 @@ def project_points_to_mask(points_A, points_B, view_dir, image_res=256):
     min_xy = all_proj.min(axis=0)
     max_xy = all_proj.max(axis=0)
 
-    # kleiner Rand, damit Projektion nicht am Bildrand klebt
     extent = max_xy - min_xy
     extent[extent == 0] = 1.0
     margin = 0.05 * extent
@@ -299,9 +258,6 @@ def project_points_to_mask(points_A, points_B, view_dir, image_res=256):
 
 
 def boundary_from_mask(mask):
-    """
-    Extrahiert Randpixel aus einer 2D-Binärmaske.
-    """
     if not np.any(mask):
         return np.zeros_like(mask, dtype=bool)
 
@@ -312,18 +268,12 @@ def boundary_from_mask(mask):
 
 
 def symmetric_boundary_distance(mask_A, mask_B):
-    """
-    Symmetrische Chamfer-Distanz zwischen zwei Randkurven.
-
-    Kleine Werte bedeuten hohe Ähnlichkeit.
-    """
     boundary_A = boundary_from_mask(mask_A)
     boundary_B = boundary_from_mask(mask_B)
 
     if not np.any(boundary_A) or not np.any(boundary_B):
         return np.nan
 
-    # Distanz jedes Pixels zum nächsten Randpixel von B
     dist_to_B = distance_transform_edt(~boundary_B)
     dist_to_A = distance_transform_edt(~boundary_A)
 
@@ -332,7 +282,6 @@ def symmetric_boundary_distance(mask_A, mask_B):
 
     chamfer = 0.5 * (d_A_to_B + d_B_to_A)
 
-    # Normalisierung auf Bilddiagonale
     diag = np.sqrt(mask_A.shape[0] ** 2 + mask_A.shape[1] ** 2)
     chamfer_norm = chamfer / diag
 
@@ -344,10 +293,6 @@ def symmetric_boundary_distance(mask_A, mask_B):
 
 
 def default_view_directions():
-    """
-    Beispielhafte Blickrichtungen.
-    Du kannst diese Liste beliebig erweitern.
-    """
     dirs = [
         [1, 0, 0],
         [0, 1, 0],
@@ -371,10 +316,6 @@ def default_view_directions():
 
 
 def side_view_measure(A, B, lin, image_res=256, view_dirs=None):
-    """
-    Berechnet ein Side-view-Maß über mehrere Projektionen.
-    Grundlage sind die belegten Voxel.
-    """
     if view_dirs is None:
         view_dirs = default_view_directions()
 
@@ -432,7 +373,6 @@ def _is_faces_array(a):
     return arr.ndim == 2 and arr.shape[1] in (3, 4) and np.issubdtype(arr.dtype, np.integer)
 
 def _find_vf_in_object(obj):
-    # prüfe direkt Attribute
     candidates_v = {}
     candidates_f = {}
 
@@ -449,7 +389,6 @@ def _find_vf_in_object(obj):
         if _is_faces_array(attr):
             candidates_f[name] = np.asarray(attr)
 
-        # falls nested (z. B. obj.mesh.vertices)
         if not candidates_v or not candidates_f:
             if hasattr(attr, "__dict__") or isinstance(attr, object):
                 for subname in dir(attr):
@@ -464,11 +403,9 @@ def _find_vf_in_object(obj):
                     if _is_faces_array(subattr) and subname not in candidates_f:
                         candidates_f[f"{name}.{subname}"] = np.asarray(subattr)
 
-    # Wähle plausibelstes Paar: verts mit float dtype und faces mit int dtype
     verts = None
     faces = None
 
-    # prefer typical names
     pref_v_names = ["v", "vertices", "vert", "points"]
     pref_f_names = ["f", "faces", "triangles", "cells"]
 
@@ -481,7 +418,6 @@ def _find_vf_in_object(obj):
             faces = candidates_f[n]
             break
 
-    # fallback: take any
     if verts is None and candidates_v:
         verts = next(iter(candidates_v.values()))
     if faces is None and candidates_f:
@@ -495,13 +431,12 @@ def make_watertight_with_pymeshfix(input_stl, output_stl):
         mesh = trimesh.util.concatenate(list(mesh.geometry.values()))
     mesh = mesh.copy()
 
-    print("Before watertight:", mesh.is_watertight)
-    print("Before faces:", len(mesh.faces))
-    print("Before verts:", len(mesh.vertices))
+    #print("Before watertight:", mesh.is_watertight)
+    #print("Before faces:", len(mesh.faces))
+    #print("Before verts:", len(mesh.vertices))
 
     mf = pymeshfix.MeshFix(mesh.vertices.copy(), mesh.faces.copy())
 
-    # safe call: versuche mögliche kwargs, fallback auf kein Argument
     sig = inspect.signature(mf.repair)
     candidate_kwargs = {
         "joincomp": True,
@@ -519,7 +454,6 @@ def make_watertight_with_pymeshfix(input_stl, output_stl):
     except TypeError:
         mf.repair()
 
-    # jetzt robust Vertex/Face-Arrays extrahieren
     verts, faces, cand_vs, cand_fs = _find_vf_in_object(mf)
 
     if verts is None or faces is None:
@@ -529,7 +463,6 @@ def make_watertight_with_pymeshfix(input_stl, output_stl):
         print("Dir(meshfix):", dir(mf))
         raise RuntimeError("MeshFix repariert, aber konnte v/f nicht extrahieren. Bitte gib dir(dir(meshfix)) Ausgabe und ich helfe weiter.")
 
-    # Falls faces Float sind (manche APIs liefern float), cast zu int
     faces = np.asarray(faces)
     if not np.issubdtype(faces.dtype, np.integer):
         faces = faces.astype(np.int64)
@@ -542,10 +475,10 @@ def make_watertight_with_pymeshfix(input_stl, output_stl):
     except Exception:
         pass
 
-    print("After watertight:", repaired.is_watertight)
-    print("After faces:", len(repaired.faces))
-    print("After verts:", len(repaired.vertices))
-    print("After volume:", repaired.volume)
+    #print("After watertight:", repaired.is_watertight)
+    #print("After faces:", len(repaired.faces))
+    #print("After verts:", len(repaired.vertices))
+    #print("After volume:", repaired.volume)
 
     repaired.export(output_stl)
     return repaired
@@ -560,8 +493,8 @@ def compare_stl_files(
     true_mesh = load_mesh(true_stl)
     recon_mesh = load_mesh(recon_stl)
 
-    print("True mesh watertight:", true_mesh.is_watertight)
-    print("Recon mesh watertight:", recon_mesh.is_watertight)
+    #print("True mesh watertight:", true_mesh.is_watertight)
+    #print("Recon mesh watertight:", recon_mesh.is_watertight)
 
     true_mesh = normalize_mesh_to_unit_box(
         true_mesh,
@@ -573,10 +506,10 @@ def compare_stl_files(
         per_axis=per_axis_normalization
     )
 
-    print("Voxelizing true mesh...")
+    #print("Voxelizing true mesh...")
     A, lin = voxelize_by_trimesh_fill(true_mesh, resolution=voxel_resolution)
 
-    print("Voxelizing reconstructed mesh...")
+    #print("Voxelizing reconstructed mesh...")
     B, _ = voxelize_by_trimesh_fill(recon_mesh, resolution=voxel_resolution)
 
     vox_result = voxel_similarity(A, B)
@@ -589,7 +522,6 @@ def compare_stl_files(
     )
 
     return vox_result, side_result
-
 
 if __name__ == "__main__":
     root=Path.cwd()
@@ -609,11 +541,145 @@ if __name__ == "__main__":
         per_axis_normalization=False
     )
 
-    print("\n--- Voxel-based measure ---")
-    for key, value in vox.items():
-        print(f"{key}: {value}")
+    #print("\n--- Voxel-based measure ---")
+    # for key, value in vox.items():
+    #     print(f"{key}: {value}")
 
-    print("\n--- Side-view measure ---")
-    print("mean_boundary_distance_px:", side["mean_boundary_distance_px"])
-    print("mean_boundary_distance_normalized:", side["mean_boundary_distance_normalized"])
-    print("mean_boundary_similarity:", side["mean_boundary_similarity"])
+    # print("\n--- Side-view measure ---")
+    # print("mean_boundary_distance_px:", side["mean_boundary_distance_px"])
+    # print("mean_boundary_distance_normalized:", side["mean_boundary_distance_normalized"])
+    # print("mean_boundary_similarity:", side["mean_boundary_similarity"])
+
+def evaluate_geometry(
+    model,
+    sample_folders,
+    device,
+    r_max,
+    voxel_resolution=64,
+    projection_resolution=128,
+    sdf_resolution=32,
+    output_dir=None,
+):
+    if output_dir is None:
+        output_dir = Path("validation_reconstructions")
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    was_training = model.training
+    model.eval()
+
+    voxel_scores = []
+    side_scores = []
+    skipped = 0
+
+    with torch.no_grad():
+        for sample_folder in sample_folders:
+            try:
+                csv_path_bin = sorted(sample_folder.glob("lc_bin*.csv"))[0]
+                csv_path_intens = sorted(sample_folder.glob("lc_intens*.csv"))[0]
+
+                true_stl = sorted(sample_folder.glob("asteroid*.stl"))[0]
+
+                lc_bin = load_lightcurve(csv_path_bin)
+                lc_intens = load_lightcurve(csv_path_intens)
+                if lc_bin.shape != lc_intens.shape:
+                    raise ValueError(
+                        "Binary- und Intensity-Lightcurve haben unterschiedliche Formen: "
+                        f"{lc_bin.shape} vs. {lc_intens.shape}"
+                    )
+                lc = np.stack([lc_bin, lc_intens], axis=0)
+
+                lc = np.transpose(lc, (0, 2, 1))
+
+                lc = np.expand_dims(lc, axis=0)
+
+                lc = torch.tensor(
+                    lc,
+                    dtype=torch.float32,
+                    device=device
+                )
+
+                match = re.search(
+                    r"radius([0-9]+(?:\.[0-9]+)?)",
+                    csv_path_bin.name
+                )
+
+                if match is None:
+                    print(f"Radius not found: {csv_path_bin.name}")
+                    skipped += 1
+                    continue
+
+                radius_value = float(match.group(1))
+
+                radius_model = torch.tensor(
+                    [radius_value / r_max],
+                    dtype=torch.float32,
+                    device=device
+                )
+
+                sdf = reconstruct_sdf(
+                    model,
+                    lc,
+                    radius_model,
+                    res=sdf_resolution
+                )
+
+                recon_stl = output_dir / (
+                    f"{sample_folder.name}_reconstruction.stl"
+                )
+
+                recon_mesh = sdf_to_stl(
+                    sdf,
+                    recon_stl,
+                    radius=radius_value
+                )
+
+                recon_mesh = trimesh.load(recon_stl, force="mesh")
+
+                if recon_mesh is None:
+                    skipped += 1
+                    continue
+
+                if not recon_mesh.is_watertight:
+                    repaired_stl = output_dir / (
+                        f"{sample_folder.name}_repaired.stl"
+                    )
+
+                    make_watertight_with_pymeshfix(
+                        recon_stl,
+                        repaired_stl
+                    )
+
+                    recon_stl = repaired_stl
+
+                vox, side = compare_stl_files(
+                    true_stl,
+                    recon_stl,
+                    voxel_resolution=voxel_resolution,
+                    projection_resolution=projection_resolution,
+                    per_axis_normalization=False
+                )
+
+                voxel_score = vox.get("voxel_score")
+                side_score = side.get("mean_boundary_similarity")
+
+                if np.isfinite(voxel_score):
+                    voxel_scores.append(voxel_score)
+
+                if np.isfinite(side_score):
+                    side_scores.append(side_score)
+
+            except Exception as e:
+                print(f"Evaluation failed for {sample_folder}: {e}")
+                skipped += 1
+
+    if was_training:
+        model.train()
+
+    return {
+        "voxel_score": float(np.mean(voxel_scores)) if voxel_scores else np.nan,
+        "side_view_score": float(np.mean(side_scores)) if side_scores else np.nan,
+        "n_evaluated": len(voxel_scores),
+        "n_skipped": skipped,
+    }

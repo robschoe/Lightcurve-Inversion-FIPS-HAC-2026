@@ -50,8 +50,6 @@ def reconstruct_sdf(model, lc, radius, res=128, chunk=200000, device=None):
         if radius.dim() == 0:
             radius = radius.unsqueeze(0)
 
-    lc = lc.to(device)
-
     coords = torch.linspace(-1, 1, res, device=device)
 
     X, Y, Z = torch.meshgrid(
@@ -81,32 +79,144 @@ def reconstruct_sdf(model, lc, radius, res=128, chunk=200000, device=None):
 
     return sdf_grid
 
-def sdf_to_stl(sdf, out_path, radius):
-    res = sdf.shape[0]
+def sdf_to_stl(
+    sdf,
+    out_path,
+    radius,
+    padding_voxels=2,
+    keep_largest_component=True,
+    try_fill_holes=True
+):
+    if torch.is_tensor(sdf):
+        sdf = sdf.detach().cpu().numpy()
+
+    sdf = np.asarray(sdf, dtype=np.float32)
+
     if torch.is_tensor(radius):
         radius = radius.detach().cpu().item()
 
-    print("sdf min:", sdf.min())
-    print("sdf max:", sdf.max())
+    radius = float(radius)
 
-    if not (sdf.min() <= 0 <= sdf.max()):
-        raise ValueError("SDF does not cross zero. Surface cannot be extracted.")
+    if sdf.ndim != 3:
+        raise ValueError(
+            f"SDF muss die Form [res, res, res] haben, "
+            f"erhalten: {sdf.shape}"
+        )
 
-    verts, faces, normals, values = measure.marching_cubes(
-        sdf,
-        level=0.0,
-        spacing=(2/(res-1), 2/(res-1), 2/(res-1))
+    if not (
+        np.isfinite(sdf).all()
+    ):
+        raise ValueError("SDF enthält NaN- oder Inf-Werte.")
+
+    if not (
+        float(sdf.min()) <= 0.0 <= float(sdf.max())
+    ):
+        print(
+            "Warning: SDF does not cross zero. "
+            f"min={sdf.min():.6f}, max={sdf.max():.6f}"
+        )
+        return None
+
+    if not (
+        sdf.shape[0] == sdf.shape[1] == sdf.shape[2]
+    ):
+        raise ValueError(
+            f"Erwarte ein kubisches SDF-Gitter, erhalten: {sdf.shape}"
+        )
+
+    res = sdf.shape[0]
+
+    if res < 2:
+        raise ValueError("SDF-Auflösung muss mindestens 2 sein.")
+
+    boundary_values = np.concatenate([
+        sdf[0, :, :].ravel(),
+        sdf[-1, :, :].ravel(),
+        sdf[:, 0, :].ravel(),
+        sdf[:, -1, :].ravel(),
+        sdf[:, :, 0].ravel(),
+        sdf[:, :, -1].ravel(),
+    ])
+
+    boundary_median = np.median(boundary_values)
+
+    outside_sign = 1.0 if boundary_median >= 0.0 else -1.0
+
+    outside_value = outside_sign * max(
+        float(np.max(np.abs(sdf))) * 2.0,
+        1.0
     )
 
-    # marching_cubes startet bei Koordinate 0, also nach [-1,1] verschieben
-    verts -= 1.0
+    sdf_padded = np.pad(
+        sdf,
+        pad_width=padding_voxels,
+        mode="constant",
+        constant_values=outside_value
+    )
 
-    # x/y zurückskalieren
+    if not (
+        float(sdf_padded.min()) <= 0.0 <= float(sdf_padded.max())
+    ):
+        print("Warning: Gepaddetes SDF kreuzt Null nicht.")
+        return None
+
+    voxel_size = 2.0 / (res - 1)
+
+    verts, faces, normals, values = measure.marching_cubes(
+        sdf_padded,
+        level=0.0,
+        spacing=(
+            voxel_size,
+            voxel_size,
+            voxel_size
+        )
+    )
+
+    grid_origin = -1.0 - padding_voxels * voxel_size
+
+    verts += grid_origin
+
     verts[:, 0] *= radius
     verts[:, 1] *= radius
 
-    mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=True)
+    mesh = trimesh.Trimesh(
+        vertices=verts,
+        faces=faces,
+        process=True
+    )
+
+    mesh.update_faces(mesh.unique_faces())
+    mesh.update_faces(mesh.nondegenerate_faces())
+    mesh.remove_unreferenced_vertices()
+
+    if keep_largest_component:
+        components = mesh.split(
+            only_watertight=False
+        )
+
+        if len(components) > 1:
+            mesh = max(
+                components,
+                key=lambda component: len(component.faces)
+            )
+
+    if try_fill_holes and not mesh.is_watertight:
+        trimesh.repair.fill_holes(mesh)
+
+    trimesh.repair.fix_normals(
+        mesh,
+        multibody=True
+    )
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
     mesh.export(out_path)
+
+    return mesh
 
 def stl_to_voxels(stl_path, resolution=64, R_max=5.313693321295838):
     mesh = trimesh.load(stl_path)
@@ -231,3 +341,13 @@ def cylinder_mask(resolution, radius, device):
     mask = r_grid <= radius**2
 
     return mask.float()
+
+def fourier_encoding(x, num_freqs=4):
+    enc = [x]
+
+    for i in range(num_freqs):
+        freq = 2.0 ** i
+        enc.append(torch.sin(freq * torch.pi * x))
+        enc.append(torch.cos(freq * torch.pi * x))
+
+    return torch.cat(enc, dim=-1)
