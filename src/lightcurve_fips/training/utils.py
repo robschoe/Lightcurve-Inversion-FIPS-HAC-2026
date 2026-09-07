@@ -12,7 +12,7 @@ import os
 import time
 import torch.nn.functional as F
 
-R_max = 5.313693321295838
+R_max = 6
 
 def parse_radius_from_stl(stl_path):
     m = re.search(r"radius([0-9]+(?:\.[0-9]+)?)", stl_path.name)
@@ -36,13 +36,12 @@ def positional_encoding(points, num_freqs=6):
 
     return torch.cat(enc, dim=-1)
 
-def reconstruct_sdf(model, lc, radius, res=128, chunk=200000, device=None):
+def reconstruct_sdf(model, lc, radius, grid_extent=1.0, res=128, chunk=200000, device=None):
     if device is None:
         device = next(model.parameters()).device
 
     model.eval()
 
-    # sicherstellen, dass radius Tensor mit Batch-Dimension ist
     if not torch.is_tensor(radius):
         radius = torch.tensor([radius], dtype=torch.float32, device=device)
     else:
@@ -50,7 +49,21 @@ def reconstruct_sdf(model, lc, radius, res=128, chunk=200000, device=None):
         if radius.dim() == 0:
             radius = radius.unsqueeze(0)
 
-    coords = torch.linspace(-1, 1, res, device=device)
+    radius = radius.reshape(-1)
+
+    if lc.shape[0] != 1:
+        raise ValueError(
+            f"Erwarte Batchgröße 1, erhalten: {lc.shape[0]}"
+        )
+
+    if radius.numel() != 1:
+        raise ValueError(
+            f"Erwarte einen Radius, erhalten: {radius.shape}"
+        )
+
+    lc = lc.to(device)
+
+    coords = torch.linspace(-grid_extent, grid_extent, res, device=device, dtype=torch.float32,)
 
     X, Y, Z = torch.meshgrid(
         coords, coords, coords,
@@ -60,29 +73,30 @@ def reconstruct_sdf(model, lc, radius, res=128, chunk=200000, device=None):
     grid_points = torch.stack([X, Y, Z], dim=-1)
     grid_points = grid_points.reshape(-1, 3)
 
-    sdf_values = []
+    was_training = model.training
+    model.eval()
+    try:
+        sdf_values = []
+        with torch.inference_mode():
+            for start in range(0, len(grid_points), chunk):
+                points = grid_points[start:start + chunk].unsqueeze(0)
 
-    with torch.no_grad():
-        for i in range(0, grid_points.shape[0], chunk):
-            points = grid_points[i:i+chunk]
+                sdf = model(lc, points, radius)
 
-            # shape: (1, chunk, 3)
-            points = points.unsqueeze(0)
+                sdf_values.append(sdf.squeeze(0).float().cpu())
 
-            sdf = model(lc, points, radius)
+        sdf_grid = torch.cat(sdf_values, dim=0)
+        sdf_grid = sdf_grid.reshape(res, res, res).numpy()
 
-            # shape: (1, chunk)
-            sdf_values.append(sdf.squeeze(0).cpu())
-
-    sdf_grid = torch.cat(sdf_values, dim=0)
-    sdf_grid = sdf_grid.reshape(res, res, res).numpy()
-
-    return sdf_grid
+        return sdf_grid
+    finally:
+        model.train(was_training)
 
 def sdf_to_stl(
     sdf,
     out_path,
     radius,
+    grid_extent=1.0,
     padding_voxels=2,
     keep_largest_component=True,
     try_fill_holes=True
@@ -160,7 +174,7 @@ def sdf_to_stl(
         print("Warning: Gepaddetes SDF kreuzt Null nicht.")
         return None
 
-    voxel_size = 2.0 / (res - 1)
+    voxel_size = (2.0 * grid_extent) / (res - 1)
 
     verts, faces, normals, values = measure.marching_cubes(
         sdf_padded,
@@ -172,7 +186,7 @@ def sdf_to_stl(
         )
     )
 
-    grid_origin = -1.0 - padding_voxels * voxel_size
+    grid_origin = -grid_extent - padding_voxels * voxel_size
 
     verts += grid_origin
 

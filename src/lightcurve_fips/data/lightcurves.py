@@ -13,11 +13,19 @@ import time
 import torch.nn.functional as F
 
 def load_lightcurve(csv_path):
+    """
+    Load given lightcurve csv or txt file and return 21 normalized camera channels.
+
+    The first column is ignored since it only contains the frame. The duplicate middle view
+    of each direction is removed, leaving 21 channels.
+
+    Each camera channel is normalized by its mean over all frames.    
+    """
     data = pd.read_csv(csv_path, header=None)
 
     values = data.values.astype(np.float32)
 
-    # Falls erste Spalte Framezahl ist:
+    #Drop first non-camera column, the frame index.
     values = values[:, 1:]
 
     if values.shape[1] != 28:
@@ -25,19 +33,21 @@ def load_lightcurve(csv_path):
             f"28 cameracolumns expected, got: {values.shape[1]}"
         )
 
+    #Array to keep track where relevant data is located and where the duplicate is stored.
     keep_indices = []
 
     for direction in range(7):
         start = direction * 4
 
         keep_indices.extend([
-            start,       # mid
-            start + 2,   # top
-            start + 3,   # bottom
+            start,       #Mid View 1
+            start + 2,   #Top View
+            start + 3,   #Bottom View
         ])
 
     values = values[:, keep_indices]
 
+    #Normalize each camera lightcurve by its temporal mean.
     values = values / (
         values.mean(axis=0, keepdims=True) + 1e-8
     )

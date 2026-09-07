@@ -25,11 +25,11 @@ CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-modelname="best_by_voxel_score_sdf_99k_net1_avgpool8"
+modelname="checkpoint80_sdf_69k_net2_combined_residual_beta0_1_newsdf"
 
 checkpoint = torch.load(CHECKPOINT_DIR/f"{modelname}.pth", map_location=device)
 
-R_max = 5.313693321295838
+R_max = 6
 
 model = LightcurveSDFNet(
     num_cameras=checkpoint["num_cameras"],

@@ -21,14 +21,26 @@ class LightcurveEncoderResidual(nn.Module):
         num_modalities=2,
         latent_dim=256,
         pool_length=16,
-        dropout=0.05
+        dropout=0.05,
+        use_first_derivative=False,
+        use_second_derivative=False,
     ):
         super().__init__()
 
         self.num_cameras = num_cameras
         self.num_modalities = num_modalities
+        self.use_first_derivative = use_first_derivative
+        self.use_second_derivative = use_second_derivative
 
-        input_channels = num_modalities * num_cameras
+        n_feature_groups = 1
+
+        if use_first_derivative:
+            n_feature_groups += 1
+
+        if use_second_derivative:
+            n_feature_groups += 1
+
+        input_channels = num_modalities * n_feature_groups * num_cameras
 
         self.input_projection = nn.Sequential(
             nn.Conv1d(
@@ -36,7 +48,12 @@ class LightcurveEncoderResidual(nn.Module):
                 64,
                 kernel_size=7,
                 padding=3,
-                padding_mode="circular"
+                padding_mode="circular",
+                bias=False,
+            ),
+            nn.GroupNorm(
+                num_groups=8,
+                num_channels=64,
             ),
             nn.SiLU()
         )
@@ -78,7 +95,12 @@ class LightcurveEncoderResidual(nn.Module):
             nn.Conv1d(
                 64,
                 128,
-                kernel_size=1
+                kernel_size=1,
+                bias=False,
+            ),
+            nn.GroupNorm(
+                num_groups=8,
+                num_channels=128,
             ),
             nn.SiLU()
         )
