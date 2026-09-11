@@ -1,20 +1,15 @@
 import trimesh
 import numpy as np
-import pandas as pd
 from pathlib import Path
 import torch
-from torch.utils.data import Dataset
-import torch.nn as nn
-from torch.utils.data import DataLoader
 from skimage import measure
 import re
-import os
-import time
 import torch.nn.functional as F
 
 R_max = 6
 
 def parse_radius_from_stl(stl_path):
+    """Simple function to extract radius written in the name of a file"""
     m = re.search(r"radius([0-9]+(?:\.[0-9]+)?)", stl_path.name)
 
     if m is None:
@@ -23,10 +18,7 @@ def parse_radius_from_stl(stl_path):
     return float(m.group(1))
 
 def positional_encoding(points, num_freqs=6):
-    """
-    points: (B, N, 3)
-    output: (B, N, 3 + 2*num_freqs*3)
-    """
+    """Expand points by sin and cos of their points times given frequencies"""
     enc = [points]
 
     for i in range(num_freqs):
@@ -36,54 +28,58 @@ def positional_encoding(points, num_freqs=6):
 
     return torch.cat(enc, dim=-1)
 
-def reconstruct_sdf(model, lc, radius, grid_extent=1.0, res=128, chunk=200000, device=None):
+def reconstruct_sdf(model, lc, radius, grid_extent=1.1, res=128, chunk=200000, device=None):
+    """Evaluate a trained model on a 3D grid. The given Lightcurves and radius define the model."""
     if device is None:
         device = next(model.parameters()).device
 
+    was_training = model.training
     model.eval()
 
-    if not torch.is_tensor(radius):
-        radius = torch.tensor([radius], dtype=torch.float32, device=device)
-    else:
-        radius = radius.to(device)
+    try:
+        #Convert the radius to a float tensor.
+        radius = torch.as_tensor(radius, dtype=torch.float32, device=device)
+
+        #Make sure the radius is only a single number.
         if radius.dim() == 0:
             radius = radius.unsqueeze(0)
 
-    radius = radius.reshape(-1)
+        radius = radius.reshape(-1)
 
-    if lc.shape[0] != 1:
-        raise ValueError(
-            f"Erwarte Batchgröße 1, erhalten: {lc.shape[0]}"
+        #Only one Lightcurve input at a time.
+        if lc.shape[0] != 1:
+            raise ValueError(
+                f"Expected batch size 1, but got {lc.shape[0]}."
+            )
+
+        if radius.numel() != 1:
+            raise ValueError(
+                f"Expected exactly one radius, but got shape {tuple(radius.shape)}."
+            )
+
+        lc = lc.to(device)
+
+        #Create a 3D grid that is evenly spaced in the given extent with the given resolution.
+        coords = torch.linspace(-grid_extent, grid_extent, res, device=device, dtype=torch.float32,)
+
+        X, Y, Z = torch.meshgrid(
+            coords, coords, coords,
+            indexing="ij"
         )
 
-    if radius.numel() != 1:
-        raise ValueError(
-            f"Erwarte einen Radius, erhalten: {radius.shape}"
-        )
+        grid_points = torch.stack([X, Y, Z], dim=-1)
+        grid_points = grid_points.reshape(-1, 3)
 
-    lc = lc.to(device)
-
-    coords = torch.linspace(-grid_extent, grid_extent, res, device=device, dtype=torch.float32,)
-
-    X, Y, Z = torch.meshgrid(
-        coords, coords, coords,
-        indexing="ij"
-    )
-
-    grid_points = torch.stack([X, Y, Z], dim=-1)
-    grid_points = grid_points.reshape(-1, 3)
-
-    was_training = model.training
-    model.eval()
-    try:
         sdf_values = []
+
         with torch.inference_mode():
+            #Query each point in the grid and collect the models output.
             for start in range(0, len(grid_points), chunk):
                 points = grid_points[start:start + chunk].unsqueeze(0)
 
                 sdf = model(lc, points, radius)
 
-                sdf_values.append(sdf.squeeze(0).float().cpu())
+                sdf_values.append(sdf.reshape(-1).float().cpu())
 
         sdf_grid = torch.cat(sdf_values, dim=0)
         sdf_grid = sdf_grid.reshape(res, res, res).numpy()
@@ -92,57 +88,44 @@ def reconstruct_sdf(model, lc, radius, grid_extent=1.0, res=128, chunk=200000, d
     finally:
         model.train(was_training)
 
-def sdf_to_stl(
-    sdf,
-    out_path,
-    radius,
-    grid_extent=1.0,
-    padding_voxels=2,
-    keep_largest_component=True,
-    try_fill_holes=True
-):
+def sdf_to_stl(sdf, out_path, radius, grid_extent=1.1, padding_voxels=2, keep_largest_component=True, try_fill_holes=True, outside_positive=None):
+    """Extract the STL file described by a set of sdf point-value sets."""
     if torch.is_tensor(sdf):
         sdf = sdf.detach().cpu().numpy()
 
     sdf = np.asarray(sdf, dtype=np.float32)
 
     if torch.is_tensor(radius):
+        if radius.numel() != 1:
+            raise ValueError(f"Expected one scalar radius, got shape {tuple(radius.shape)}.")
         radius = radius.detach().cpu().item()
 
     radius = float(radius)
 
+    #Marching cubes expects a 3D scalar field.
     if sdf.ndim != 3:
-        raise ValueError(
-            f"SDF muss die Form [res, res, res] haben, "
-            f"erhalten: {sdf.shape}"
-        )
+        raise ValueError(f"Expected SDF shape [res, res, res], got {sdf.shape}")
 
-    if not (
-        np.isfinite(sdf).all()
-    ):
-        raise ValueError("SDF enthält NaN- oder Inf-Werte.")
+    if not np.isfinite(sdf).all():
+        raise ValueError("SDF contains NaN or Inf values.")
 
-    if not (
-        float(sdf.min()) <= 0.0 <= float(sdf.max())
-    ):
-        print(
-            "Warning: SDF does not cross zero. "
-            f"min={sdf.min():.6f}, max={sdf.max():.6f}"
-        )
-        return None
-
-    if not (
-        sdf.shape[0] == sdf.shape[1] == sdf.shape[2]
-    ):
-        raise ValueError(
-            f"Erwarte ein kubisches SDF-Gitter, erhalten: {sdf.shape}"
-        )
+    if not (sdf.shape[0] == sdf.shape[1] == sdf.shape[2]):
+        raise ValueError(f"Expected a cubic SDF grid, got {sdf.shape}.")
 
     res = sdf.shape[0]
 
     if res < 2:
-        raise ValueError("SDF-Auflösung muss mindestens 2 sein.")
+        raise ValueError("SDF resolution must be at least 2.")
 
+    if padding_voxels < 0:
+        raise ValueError("padding_voxels must be non-negative.")
+
+    if not (float(sdf.min()) <= 0.0 <= float(sdf.max())):
+        print("Warning: SDF does not cross zero. "
+            f"min={sdf.min():.6f}, max={sdf.max():.6f}")
+        return None
+
+    #Define boundary values to determine if the outside region is positive or negative. The standard is positive.
     boundary_values = np.concatenate([
         sdf[0, :, :].ravel(),
         sdf[-1, :, :].ravel(),
@@ -152,14 +135,15 @@ def sdf_to_stl(
         sdf[:, :, -1].ravel(),
     ])
 
-    boundary_median = np.median(boundary_values)
+    if outside_positive is None:
+        outside_positive = np.median(boundary_values) >= 0.0
 
-    outside_sign = 1.0 if boundary_median >= 0.0 else -1.0
+    # Use a sufficiently large constant SDF value outside the original grid.
+    max_abs_sdf = float(np.max(np.abs(sdf)))
+    outside_value = max(2.0 * max_abs_sdf, 1.0)
 
-    outside_value = outside_sign * max(
-        float(np.max(np.abs(sdf))) * 2.0,
-        1.0
-    )
+    if not outside_positive:
+        outside_value = -outside_value
 
     sdf_padded = np.pad(
         sdf,
@@ -168,26 +152,29 @@ def sdf_to_stl(
         constant_values=outside_value
     )
 
-    if not (
-        float(sdf_padded.min()) <= 0.0 <= float(sdf_padded.max())
-    ):
-        print("Warning: Gepaddetes SDF kreuzt Null nicht.")
+    if not (float(sdf_padded.min()) <= 0.0 <= float(sdf_padded.max())):
+        print("Warning: padded SDF does not cross zero.")
         return None
 
+    #Determine the granularity for marching cubes.
     voxel_size = (2.0 * grid_extent) / (res - 1)
 
-    verts, faces, normals, values = measure.marching_cubes(
-        sdf_padded,
-        level=0.0,
-        spacing=(
-            voxel_size,
-            voxel_size,
-            voxel_size
+    try:
+        #Use marching cubes to extract surface of the sdf sets.
+        verts, faces, normals, values = measure.marching_cubes(
+            sdf_padded,
+            level=0.0,
+            spacing=(
+                voxel_size,
+                voxel_size,
+                voxel_size,
+            ),
         )
-    )
+    except ValueError as exc:
+        print(f"Marching Cubes failed: {exc}")
+        return None
 
     grid_origin = -grid_extent - padding_voxels * voxel_size
-
     verts += grid_origin
 
     verts[:, 0] *= radius
@@ -199,19 +186,22 @@ def sdf_to_stl(
         process=True
     )
 
+    #Remove unnecessary triangles.
     mesh.update_faces(mesh.unique_faces())
     mesh.update_faces(mesh.nondegenerate_faces())
     mesh.remove_unreferenced_vertices()
 
+    if len(mesh.faces) == 0:
+        print("Warning: Mesh contains no valid faces after cleanup.")
+        return None
+
     if keep_largest_component:
-        components = mesh.split(
-            only_watertight=False
-        )
+        components = mesh.split(only_watertight=False)
 
         if len(components) > 1:
             mesh = max(
                 components,
-                key=lambda component: len(component.faces)
+                key=lambda component: component.area
             )
 
     if try_fill_holes and not mesh.is_watertight:
@@ -222,6 +212,7 @@ def sdf_to_stl(
         multibody=True
     )
 
+    #Create new directory if necessary and save the mesh.
     out_path = Path(out_path)
     out_path.parent.mkdir(
         parents=True,
@@ -232,84 +223,50 @@ def sdf_to_stl(
 
     return mesh
 
-def stl_to_voxels(stl_path, resolution=64, R_max=5.313693321295838):
-    mesh = trimesh.load(stl_path)
+def stl_to_sdf_grid(stl_path, radius, resolution=128, tau=0.1, grid_extent=1.1,):
+    """Convert a given STL file to a SDF (signed distance field) grid"""
+    radius = float(radius)
 
-    # Optional: falls Mesh als Scene geladen wird
-    if isinstance(mesh, trimesh.Scene):
-        mesh = trimesh.util.concatenate([
-            geom for geom in mesh.geometry.values()
-        ])
+    if radius <= 0.0:
+        raise ValueError(f"radius must be positive, got {radius}.")
 
-    # Voxelgrid
-    grid = np.zeros((resolution, resolution, resolution), dtype=np.float32)
+    if resolution < 2:
+        raise ValueError(f"resolution must be at least 2, got {resolution}.")
 
-    # Vertices
-    vertices = mesh.vertices.copy()
+    if tau <= 0.0:
+        raise ValueError(f"tau must be positive, got {tau}.")
 
-    # Bounding-Box des globalen Raums
-    x_min, x_max = -R_max, R_max
-    y_min, y_max = -R_max, R_max
-    z_min, z_max = -1.0, 1.0
-
-    # Mesh voxelisieren
-    # Pitch orientiert sich an kleinster Zellgröße
-    pitch_x = (x_max - x_min) / resolution
-    pitch_y = (y_max - y_min) / resolution
-    pitch_z = (z_max - z_min) / resolution
-
-    pitch = min(pitch_x, pitch_y, pitch_z)
-
-    voxelized = mesh.voxelized(pitch=pitch).fill()
-    points = voxelized.points
-
-    # Punkte in Grid-Indizes umrechnen
-    ix = ((points[:,0] - x_min) / (x_max - x_min) * resolution).astype(int)
-    iy = ((points[:,1] - y_min) / (y_max - y_min) * resolution).astype(int)
-    iz = ((points[:,2] - z_min) / (z_max - z_min) * resolution).astype(int)
-
-    # Nur gültige Punkte
-    valid = (
-        (ix >= 0) & (ix < resolution) &
-        (iy >= 0) & (iy < resolution) &
-        (iz >= 0) & (iz < resolution)
-    )
-
-    grid[ix[valid], iy[valid], iz[valid]] = 1.0
-
-    return grid
-
-def voxels_to_stl(voxels, out_path, threshold=0.5, R_max=5.313693321295838):
-    verts, faces, normals, values = measure.marching_cubes(voxels, level=threshold)
-
-    res = voxels.shape[0]
-
-    # Indexraum -> echter Koordinatenraum
-    verts[:,0] = verts[:,0] / (res - 1) * (2 * R_max) - R_max
-    verts[:,1] = verts[:,1] / (res - 1) * (2 * R_max) - R_max
-    verts[:,2] = verts[:,2] / (res - 1) * 2.0 - 1.0
-
-    mesh = trimesh.Trimesh(vertices=verts, faces=faces)
-    mesh.export(out_path)
-
-def stl_to_sdf_grid(stl_path, radius, resolution=128, tau=0.1):
+    #Load the STL file.
     mesh = trimesh.load(stl_path)
 
     if isinstance(mesh, trimesh.Scene):
+        if len(mesh.geometry) == 0:
+            raise ValueError("The loaded scene does not contain any geometry.")
+
+        #Merge all geometries in the scene into one mesh.
         mesh = trimesh.util.concatenate(list(mesh.geometry.values()))
 
     mesh = mesh.copy()
 
-    # z auf [-1,1] normieren
+    if len(mesh.vertices) == 0 or len(mesh.faces) == 0:
+        raise ValueError("The input mesh contains no valid vertices or faces.")
+
+    #Normalize z to [-1,1]
     z_min = mesh.vertices[:, 2].min()
     z_max = mesh.vertices[:, 2].max()
-    mesh.vertices[:, 2] = 2 * (mesh.vertices[:, 2] - z_min) / (z_max - z_min) - 1
+    z_range = z_max - z_min
 
-    # x/y radius-normalisieren
+    if z_range <= 0.0:
+        raise ValueError("Cannot normalize z coordinates because the mesh has zero height.")
+
+    mesh.vertices[:, 2] = 2.0 * (mesh.vertices[:, 2] - z_min) / z_range - 1.0
+
+    #Normalize x and y by the given radius.
     mesh.vertices[:, 0] /= radius
     mesh.vertices[:, 1] /= radius
 
-    coords = np.linspace(-1, 1, resolution, dtype=np.float32)
+    #Sample in [-1,1]^3
+    coords = np.linspace(-grid_extent, grid_extent, resolution, dtype=np.float32)
 
     X, Y, Z = np.meshgrid(coords, coords, coords, indexing="ij")
 
@@ -318,6 +275,7 @@ def stl_to_sdf_grid(stl_path, radius, resolution=128, tau=0.1):
         axis=1
     )
 
+    #Compute a signed distance value for each given point.
     sdf = signed_distance_chunked(mesh, points)
 
     sdf = np.clip(sdf, -tau, tau)
@@ -326,42 +284,3 @@ def stl_to_sdf_grid(stl_path, radius, resolution=128, tau=0.1):
     sdf = sdf.reshape(resolution, resolution, resolution).astype(np.float32)
 
     return sdf
-
-def dice_loss(pred_logits, target, eps=1e-6):
-    pred = torch.sigmoid(pred_logits)
-
-    pred = pred.view(pred.shape[0], -1)
-    target = target.view(target.shape[0], -1)
-
-    intersection = (pred * target).sum(dim=1)
-    union = pred.sum(dim=1) + target.sum(dim=1)
-
-    dice = 1 - (2 * intersection + eps) / (union + eps)
-
-    return dice.mean()
-
-def cylinder_mask(resolution, radius, device):
-    batch_size = radius.shape[0]
-
-    xy = torch.linspace(-R_max, R_max, resolution, device=device)
-    z = torch.linspace(-1, 1, resolution, device=device)
-
-    x, y, z = torch.meshgrid(xy, xy, z, indexing="ij")
-
-    r_grid = (x**2 + y**2).unsqueeze(0)
-
-    radius = radius.view(batch_size, 1, 1, 1)
-
-    mask = r_grid <= radius**2
-
-    return mask.float()
-
-def fourier_encoding(x, num_freqs=4):
-    enc = [x]
-
-    for i in range(num_freqs):
-        freq = 2.0 ** i
-        enc.append(torch.sin(freq * torch.pi * x))
-        enc.append(torch.cos(freq * torch.pi * x))
-
-    return torch.cat(enc, dim=-1)
