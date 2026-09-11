@@ -26,14 +26,14 @@ DATASET_DIR = PROJECT_ROOT / "data" / "dataset2" / "test" / "test"
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-checkpoint = torch.load(CHECKPOINT_DIR/"best_by_voxel_score_sdf_159k_beta0.1_longtraining.pth", map_location=device)
+checkpoint = torch.load(CHECKPOINT_DIR/"best_by_voxel_score_sdf_newsdf_freq8.pth", map_location=device)
 
 R_max = 6
 
-RADIUS=0.88
+RADIUS=1.4142135623730951
 
-PATH_TO_BINARY_LC = PROJECT_ROOT / "data" / "dataset2" / "test" / "test"
-PATH_TO_INTENSITY_LC = PROJECT_ROOT / "data" / "dataset2" / "test" / "test"
+PATH_TO_BINARY_LC = PROJECT_ROOT / "data" / "dataset2" / "test" / "test" / "lc_bin_asteroid2_scaled_radius1.4142135623730951.stl.csv"
+PATH_TO_INTENSITY_LC = PROJECT_ROOT / "data" / "dataset2" / "test" / "test" / "lc_intens_asteroid2_scaled_radius1.4142135623730951.stl.csv"
 
 model = LightcurveSDFNet(
     num_cameras=checkpoint["num_cameras"],
@@ -68,7 +68,7 @@ with torch.inference_mode():
 
 mesh = sdf_to_stl(
     sdf=sdf,
-    out_path=PROJECT_ROOT / "data" / "dataset2" / "test" / "test",
+    out_path=PROJECT_ROOT / "data" / "dataset2" / "test" / "test" / "ASTEROID_RECONSTRUCTION.stl",
     radius=RADIUS,
     grid_extent=1.0,
 )
