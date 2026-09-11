@@ -12,7 +12,7 @@ import os
 import time
 import torch.nn.functional as F
 from lightcurve_fips.models.sdf_decoder import SDFDecoder2,SDFDecoder,FiLMSDFDecoder
-from lightcurve_fips.training.utils import fourier_encoding
+from lightcurve_fips.training.utils import positional_encoding
 
 class LightcurveEncoderResidual(nn.Module):
     def __init__(
@@ -323,7 +323,7 @@ class GeometryAwareLightcurveEncoder(nn.Module):
             dtype=lc.dtype
         )
 
-        camera_geom = fourier_encoding(
+        camera_geom = positional_encoding(
             camera_dirs,
             num_freqs=self.camera_freqs
         )

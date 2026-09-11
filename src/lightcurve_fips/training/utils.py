@@ -284,3 +284,38 @@ def stl_to_sdf_grid(stl_path, radius, resolution=128, tau=0.1, grid_extent=1.1,)
     sdf = sdf.reshape(resolution, resolution, resolution).astype(np.float32)
 
     return sdf
+
+def get_original_stl(folder):
+    """Simple function to extract stl files"""
+    stl_files = sorted(
+        path
+        for path in folder.glob("asteroid*.stl")
+        if "_reconstructed" not in path.stem
+        and "_repaired" not in path.stem
+        and "_temporary" not in path.stem
+    )
+
+    return stl_files[0] if stl_files else None
+
+def load_as_mesh(path):
+    """Loads stl as trimesh"""
+    loaded = trimesh.load(path, force="mesh")
+
+    if isinstance(loaded, trimesh.Scene):
+        meshes = [
+            geometry
+            for geometry in loaded.geometry.values()
+            if isinstance(geometry, trimesh.Trimesh)
+        ]
+
+        if not meshes:
+            raise ValueError("Scene does not contain Trimesh.")
+
+        return trimesh.util.concatenate(meshes)
+
+    if not isinstance(loaded, trimesh.Trimesh):
+        raise ValueError(
+            f"Unexpected Type: {type(loaded)}"
+        )
+
+    return loaded

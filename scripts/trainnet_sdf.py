@@ -18,7 +18,7 @@ from lightcurve_fips.rendering.camera_setup import create_camera
 start = time.time()
 start2=start
 
-R_max = 5.313693321295838
+R_max = 6
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 use_cuda = device.type == "cuda"
@@ -46,12 +46,12 @@ train_dataset, val_dataset = random_split(
     generator=generator
 )
 
-geometry_val_count = min(10, len(val_dataset))
+geometry_val_count = min(20, len(val_dataset))
 
 geometry_val_indices = val_dataset.indices[:geometry_val_count]
 
 geometry_val_folders = [
-    dataset.samples[i]
+    dataset.samples[i]["folder"]
     for i in geometry_val_indices
 ]
 
@@ -77,70 +77,35 @@ val_loader = DataLoader(
     prefetch_factor=2,
 )
 
-# cameras = []
-
-# for i in range(8):
-#     if i != 4:
-#         cameras.append(create_camera(f"camera{i}mid", i * 45, 0))
-#         cameras.append(create_camera(f"camera{i}mid", i * 45, 0))
-#         cameras.append(create_camera(f"camera{i}top", i * 45, 1))
-#         cameras.append(create_camera(f"camera{i}bot", i * 45, -1))
-
-# camera_dirs = np.asarray(cameras, dtype=np.float32)
-
-# camera_dirs /= (
-#     np.linalg.norm(camera_dirs, axis=1, keepdims=True) + 1e-8
-# )
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints" / "sdf"
 CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
-commence=0
-if commence==1:
-    checkpoint_path = CHECKPOINT_DIR / "sdf_99k" / "checkpoint2700_sdf_99k.pth"
 
-    checkpoint = torch.load(
-        checkpoint_path,
-        map_location=device
-    )
+model = LightcurveSDFNet(num_cameras=21,latent_dim=256,num_freqs=8).to(device)
 
-    model = LightcurveSDFNet(
-        num_cameras=checkpoint["num_cameras"],
-        latent_dim=checkpoint["latent_dim"],
-        num_freqs=checkpoint.get("num_freqs", 6)
-    ).to(device)
+optimizer = torch.optim.AdamW(
+    model.parameters(),
+    lr=5e-5,
+    weight_decay=1e-5,
+)
 
-    model.load_state_dict(checkpoint["model_state_dict"])
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-    start_epoch = checkpoint["epoch"] +1
-    print(f"Resuming from epoch {start_epoch}")
-else:
-    model = LightcurveSDFNet(num_cameras=21,latent_dim=256,num_freqs=6).to(device)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer,
+    mode="min",
+    factor=0.5,
+    patience=8,
+    threshold=1e-3,
+    threshold_mode="rel",
+    cooldown=2,
+    min_lr=1e-7,
+)
 
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=5e-5,
-        weight_decay=1e-5,
-    )
-
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode="min",
-        factor=0.5,
-        patience=8,
-        threshold=1e-3,
-        threshold_mode="rel",
-        cooldown=2,
-        min_lr=1e-7,
-    )
-
-    start_epoch = 0
+start_epoch = 0
 
 run = wandb.init(
     project="lightcurve-asteroid-reconstruction",
-    name="sdf-training-109ksamples-avgpool16-net2-combined-residual-dilation",
+    name="sdf-159k-net2-combined-residual-beta0.1-newsdf-freq8",
 
     config={
         "model": "LightcurveSDFNet",
@@ -148,7 +113,7 @@ run = wandb.init(
         "num_cameras": 21,
         "num_modalities": 2,
         "latent_dim": 256,
-        "num_freqs": 6,
+        "num_freqs": 8,
         "n_points": 8192,
         "batch_size": TRAIN_BATCH_SIZE,
         "learning_rate": 5e-5,
@@ -157,15 +122,13 @@ run = wandb.init(
         "R_max": R_max,
         "optimizer": "Adam",
         "mixed_precision": "bfloat16" if use_cuda else "disabled",
-        "checkpoint_loaded": commence == 1,
+        "checkpoint_loaded": False,
         "start_epoch": start_epoch,
         "train_fraction": 1.0 - val_fraction,
         "validation_fraction": val_fraction,
         "split_seed": 42,
     }
 )
-
-#scaler = torch.amp.GradScaler("cuda", enabled=use_cuda)
 
 best_geometry_voxel_score = -float("inf")
 
@@ -197,15 +160,14 @@ for epoch in range(start_epoch, start_epoch+2400):
             loss_raw = F.smooth_l1_loss(
                 pred_sdf,
                 sdf,
+                beta=0.2,
                 reduction="none"
             )
 
             weights = 1.0 + 5.0 * (torch.abs(sdf) < 0.2).float()
-            sdf_loss = (weights * loss_raw).mean()
-
-        # scaler.scale(sdf_loss).backward()
-        # scaler.step(optimizer)
-        # scaler.update()
+            sdf_loss = (
+                weights * loss_raw
+            ).sum() / weights.sum().clamp_min(1e-8)
 
         sdf_loss.backward()
         gradient_norm = torch.nn.utils.clip_grad_norm_(
@@ -255,12 +217,15 @@ for epoch in range(start_epoch, start_epoch+2400):
                 val_loss_raw = F.smooth_l1_loss(
                     pred_sdf,
                     sdf,
+                    beta=0.2,
                     reduction="none"
                 )
 
                 weights = 1.0 + 5.0 * (torch.abs(sdf) < 0.2).float()
 
-                val_loss = (weights * val_loss_raw).mean()
+                val_loss = (
+                    weights * val_loss_raw
+                ).sum() / weights.sum().clamp_min(1e-8)
                 val_raw_loss = val_loss_raw.mean()
 
             val_weighted_loss_sum += val_loss.item()
@@ -284,7 +249,7 @@ for epoch in range(start_epoch, start_epoch+2400):
 
     scheduler.step(mean_val_raw_loss)
 
-    eval_every = 3
+    eval_every = 5
 
     if epoch % eval_every == 0:
         geometry_metrics = evaluate_geometry(
@@ -293,7 +258,7 @@ for epoch in range(start_epoch, start_epoch+2400):
             device=device,
             r_max=R_max,
 
-            sdf_resolution=32,
+            sdf_resolution=64,
             voxel_resolution=128,
             projection_resolution=128,
 
@@ -305,7 +270,9 @@ for epoch in range(start_epoch, start_epoch+2400):
             f"Voxel: {geometry_metrics['voxel_score']:.4f} | "
             f"Side view: {geometry_metrics['side_view_score']:.4f} | "
             f"Evaluated: {geometry_metrics['n_evaluated']} | "
-            f"Skipped: {geometry_metrics['n_skipped']}"
+            f"Skipped: {geometry_metrics['n_skipped']}| "
+            f"Real_Voxel1: {geometry_metrics['real_voxel1']}| "
+            f"Real_Voxel2: {geometry_metrics['real_voxel2']}"
         )
 
         wandb.log({
@@ -314,6 +281,8 @@ for epoch in range(start_epoch, start_epoch+2400):
             "geometry_val/side_view_score": geometry_metrics["side_view_score"],
             "geometry_val/n_evaluated": geometry_metrics["n_evaluated"],
             "geometry_val/n_skipped": geometry_metrics["n_skipped"],
+            "geometry_val/real_voxel1": geometry_metrics['real_voxel1'],
+            "geometry_val/real_voxel2": geometry_metrics['real_voxel2'],
         })
 
         current_voxel_score = geometry_metrics["voxel_score"]
@@ -330,16 +299,17 @@ for epoch in range(start_epoch, start_epoch+2400):
                     "optimizer_state_dict": optimizer.state_dict(),
                     "scheduler_state_dict": scheduler.state_dict(),
 
-                    "train_loss": mean_train_loss,
-                    "val_sdf_loss": mean_val_loss,
-
-                    "geometry_voxel_score": current_voxel_score,
-                    "geometry_side_view_score": geometry_metrics["side_view_score"],
+                    "train_indices": train_dataset.indices,
+                    "val_indices": val_dataset.indices,
 
                     "num_cameras": 21,
                     "num_modalities": 2,
                     "latent_dim": 256,
-                    "num_freqs": 6,
+                    "num_freqs": 8,
+                    "n_points": 8192,
+                    "batch_size": TRAIN_BATCH_SIZE,
+                    "surface_weight": 5.0,
+                    "surface_threshold": 0.2,
                     "R_max": R_max,
                 }, best_path)
 
@@ -371,19 +341,25 @@ for epoch in range(start_epoch, start_epoch+2400):
     epoch_time = time.time() - epoch_start
 
     if epoch % 10 == 0:
-        checkpoint_path = CHECKPOINT_DIR / "sdf_99k" / f"checkpoint{epoch}_sdf_109k_avgpool16_net2_residual_dilation.pth"
+        checkpoint_path = CHECKPOINT_DIR / "sdf_99k" / f"checkpoint{epoch}_sdf_159k_net2_combined_residual_beta0_1_newsdf_freq8.pth"
 
         torch.save({
             "epoch": epoch,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": scheduler.state_dict(),
-            "loss": mean_train_loss,
-            "raw_loss": mean_train_raw_loss,
+
+            "train_indices": train_dataset.indices,
+            "val_indices": val_dataset.indices,
+
             "num_cameras": 21,
             "num_modalities": 2,
             "latent_dim": 256,
-            "num_freqs": 6,
+            "num_freqs": 8,
+            "n_points": 8192,
+            "batch_size": TRAIN_BATCH_SIZE,
+            "surface_weight": 5.0,
+            "surface_threshold": 0.2,
             "R_max": R_max,
         }, checkpoint_path)
 
@@ -397,7 +373,7 @@ for epoch in range(start_epoch, start_epoch+2400):
                 "weighted_sdf_loss": mean_train_loss,
                 "raw_sdf_loss": mean_train_raw_loss,
                 "latent_dim": 256,
-                "num_freqs": 6,
+                "num_freqs": 8,
                 "n_points": 8192,
             }
         )
