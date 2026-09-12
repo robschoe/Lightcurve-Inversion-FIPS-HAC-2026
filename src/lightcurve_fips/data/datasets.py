@@ -16,61 +16,6 @@ from lightcurve_fips.training.utils import parse_radius_from_stl
 
 R_max = 6
 
-class AsteroidSDFPointDataset(Dataset):
-    def __init__(self, root, n_points=8192, max_samples=None):
-        PROJECT_ROOT = Path(__file__).resolve().parents[3]
-        DATASET_ROOT = PROJECT_ROOT / root
-        self.root = DATASET_ROOT
-        self.n_points = n_points
-        self.samples = []
-
-        for p in self.root.rglob("sample*"):
-            if not p.is_dir():
-                continue
-
-            has_brightness = any(p.glob("brightness*.csv"))
-            has_points = any(p.glob(f"points_{n_points}_*.npy"))
-            has_sdf = any(p.glob(f"sdf_{n_points}_*.npy"))
-
-            if has_brightness and has_points and has_sdf:
-                self.samples.append(p)
-
-                if max_samples is not None and len(self.samples) >= max_samples:
-                    break
-
-        print(f"Found {len(self.samples)} samples")
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        folder = self.samples[idx]
-
-        csv_path = sorted(folder.glob("brightness*.csv"))[0]
-
-        lc = load_lightcurve(csv_path)
-
-        point_files = sorted(folder.glob(f"points_{self.n_points}_*.npy"))
-        sdf_files = sorted(folder.glob(f"sdf_{self.n_points}_*.npy"))
-
-        k = np.random.randint(len(point_files))
-
-        points = np.load(point_files[k]).astype(np.float32)
-        sdf = np.load(sdf_files[k]).astype(np.float32)
-
-        stl_path = sorted(folder.glob("asteroid*.stl"))[0]
-
-        radius_real = parse_radius_from_stl(stl_path)
-
-        radius_input = radius_real / R_max
-
-        lc = torch.tensor(lc.T, dtype=torch.float32)
-        points = torch.tensor(points, dtype=torch.float32)
-        sdf = torch.tensor(sdf, dtype=torch.float32)
-        radius = torch.tensor(radius_input, dtype=torch.float32)
-
-        return lc, points, sdf, radius
-
 def get_batch_number(sample_folder):
     """Simple function to get batch id in data"""
     match = re.search(
@@ -86,33 +31,49 @@ def get_batch_number(sample_folder):
     return int(match.group(1))
 
 class AsteroidSDFPointDatasetCombined(Dataset):
-    def __init__(self, root, n_points=8192, max_samples=None):
+    """Dataset for lightcurves, SDF query points, SDF values, and radii."""
+
+    def __init__(self, root, n_points=8192, max_samples=None, random_sampling=True):
+
+        # Resolve the dataset path relative to the project root.
         PROJECT_ROOT = Path(__file__).resolve().parents[3]
         self.root = PROJECT_ROOT / root
+        self.random_sampling = random_sampling
         self.n_points = n_points
         self.samples = []
 
-        for sample_folder in self.root.rglob("sample*"):
-            if get_batch_number(sample_folder) < 103 and get_batch_number(sample_folder) > 42:
+        #Search for all sample directories.
+        for sample_folder in sorted(self.root.rglob("sample*")):
+            if not sample_folder.is_dir():
                 continue
+
+            #Each sample needs ground-truth STL file.
             has_stl = any(sample_folder.glob("asteroid*.stl"))
 
             if not has_stl:
                 continue
 
-            if not sample_folder.is_dir():
-                continue
-
+            #Require both lightcurve variants.
             has_lc_bin = any(sample_folder.glob("lc_bin*.csv"))
             has_lc_intens = any(sample_folder.glob("lc_intens*.csv"))
 
             if not has_lc_bin or not has_lc_intens:
                 continue
-            
-            has_points = any(sample_folder.glob("points2_*.npy"))
-            has_sdf = any(sample_folder.glob("sdf2_*.npy"))
 
-            if not has_points or not has_sdf:
+            #Make sure at least one set of points and SDF values exists.
+            point_files = list(
+                sample_folder.glob(
+                    f"points_{self.n_points}_*.npy"
+                )
+            )
+
+            sdf_files = list(
+                sample_folder.glob(
+                    f"sdf_{self.n_points}_*.npy"
+                )
+            )
+
+            if not point_files or not sdf_files:
                 continue
 
             stl_path = sorted(sample_folder.glob("asteroid*.stl"))[0]
@@ -122,6 +83,7 @@ class AsteroidSDFPointDatasetCombined(Dataset):
                 "radius_real": parse_radius_from_stl(stl_path),
             })
 
+            #Stop if wanted maximum of samples is reached.
             if (
                 max_samples is not None
                 and len(self.samples) >= max_samples
@@ -131,9 +93,12 @@ class AsteroidSDFPointDatasetCombined(Dataset):
         print(f"Found {len(self.samples)} valid samples")
 
     def __len__(self):
+        """Return the number of valid dataset samples."""
         return len(self.samples)
 
     def __getitem__(self, idx):
+        """Load one lightcurve sample and one associated SDF point subset."""
+
         sample = self.samples[idx]
 
         folder = sample["folder"]
@@ -146,14 +111,46 @@ class AsteroidSDFPointDatasetCombined(Dataset):
         lc_intens = load_lightcurve(csv_path_intens)
         lc = np.stack([lc_bin, lc_intens], axis=0)
 
-        point_files = sorted(folder.glob(f"points2_{self.n_points}_*.npy"))
-        sdf_files = sorted(folder.glob(f"sdf2_{self.n_points}_*.npy"))
+        #Ignore incomplete temporary files.
+        point_files = sorted(
+            path
+            for path in folder.glob(f"points_{self.n_points}_*.npy")
+            if "tmp" not in path.stem
+        )
 
-        k = np.random.randint(len(point_files))
+        sdf_files = sorted(
+            path
+            for path in folder.glob(f"sdf_{self.n_points}_*.npy")
+            if "tmp" not in path.stem
+        )
+
+        if not point_files:
+            raise FileNotFoundError(
+                f"No point files found in {folder}. "
+                f"Expected pattern: points2_{self.n_points}_*.npy"
+            )
+
+        if not sdf_files:
+            raise FileNotFoundError(
+                f"No SDF files found in {folder}. "
+                f"Expected pattern: sdf2_{self.n_points}_*.npy"
+            )
+
+        if len(point_files) != len(sdf_files):
+            raise ValueError(
+                f"Different numbers of point and SDF files in {folder}: "
+                f"{len(point_files)} vs. {len(sdf_files)}"
+            )
+
+        if self.random_sampling:
+            k = np.random.randint(len(point_files))
+        else:
+            k = 0
 
         points = np.load(point_files[k]).astype(np.float32)
         sdf = np.load(sdf_files[k]).astype(np.float32)
 
+        #Normalize the physical radius for the neural network input.
         radius_input = radius_real / R_max
 
         lc = np.transpose(lc, (0, 2, 1))

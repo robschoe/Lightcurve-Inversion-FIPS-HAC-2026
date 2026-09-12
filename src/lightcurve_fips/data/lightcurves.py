@@ -55,124 +55,6 @@ def load_lightcurve(csv_path):
 
     return values
 
-def compare_lightcurves(
-    lc_true,
-    lc_pred,
-    remove_frame_column=True,
-    allow_circular_shift=True,
-    normalize_per_camera=True,
-):
-    lc_true = np.asarray(lc_true, dtype=np.float64)
-    lc_pred = np.asarray(lc_pred, dtype=np.float64)
-
-    if remove_frame_column:
-        lc_true = lc_true[:, 1:]
-        lc_pred = lc_pred[:, 1:]
-
-    if lc_true.shape != lc_pred.shape:
-        raise ValueError(
-            f"Lightcurve shapes differ: "
-            f"true={lc_true.shape}, pred={lc_pred.shape}"
-        )
-
-    if lc_true.ndim != 2:
-        raise ValueError(
-            "Expected shape (frames, cameras)."
-        )
-
-    valid = np.isfinite(lc_true) & np.isfinite(lc_pred)
-
-    if not np.all(valid):
-        print(
-            f"Warning: {(~valid).sum()} invalid values found. "
-            "They are replaced by 0."
-        )
-
-        lc_true = np.where(np.isfinite(lc_true), lc_true, 0.0)
-        lc_pred = np.where(np.isfinite(lc_pred), lc_pred, 0.0)
-
-    if normalize_per_camera:
-        true_mean = np.mean(lc_true, axis=0, keepdims=True)
-        pred_mean = np.mean(lc_pred, axis=0, keepdims=True)
-
-        true_std = np.std(lc_true, axis=0, keepdims=True)
-        pred_std = np.std(lc_pred, axis=0, keepdims=True)
-
-        true_std = np.maximum(true_std, 1e-8)
-        pred_std = np.maximum(pred_std, 1e-8)
-
-        true_compare = (lc_true - true_mean) / true_std
-        pred_compare = (lc_pred - pred_mean) / pred_std
-    else:
-        true_compare = lc_true.copy()
-        pred_compare = lc_pred.copy()
-
-    n_frames, n_cameras = true_compare.shape
-
-    best_shift = 0
-    best_rmse = np.inf
-    best_pred = pred_compare
-
-    if allow_circular_shift:
-        for shift in range(n_frames):
-            shifted_pred = np.roll(pred_compare, shift, axis=0)
-
-            rmse = np.sqrt(
-                np.mean((true_compare - shifted_pred) ** 2)
-            )
-
-            if rmse < best_rmse:
-                best_rmse = rmse
-                best_shift = shift
-                best_pred = shifted_pred
-    else:
-        best_pred = pred_compare
-        best_rmse = np.sqrt(
-            np.mean((true_compare - best_pred) ** 2)
-        )
-
-    rmse_per_camera = np.sqrt(
-        np.mean((true_compare - best_pred) ** 2, axis=0)
-    )
-
-    mae_per_camera = np.mean(
-        np.abs(true_compare - best_pred),
-        axis=0
-    )
-
-    corr_per_camera = np.zeros(n_cameras)
-
-    for cam in range(n_cameras):
-        y_true = true_compare[:, cam]
-        y_pred = best_pred[:, cam]
-
-        if np.std(y_true) < 1e-8 or np.std(y_pred) < 1e-8:
-            corr_per_camera[cam] = np.nan
-        else:
-            corr_per_camera[cam] = np.corrcoef(
-                y_true,
-                y_pred
-            )[0, 1]
-
-    mean_corr = np.nanmean(corr_per_camera)
-    mean_rmse = np.mean(rmse_per_camera)
-    mean_mae = np.mean(mae_per_camera)
-
-    objective = mean_rmse + 0.5 * (1.0 - mean_corr)
-
-    return {
-        "objective": float(objective),
-        "best_shift": int(best_shift),
-
-        "mean_rmse": float(mean_rmse),
-        "mean_mae": float(mean_mae),
-        "mean_correlation": float(mean_corr),
-
-        "rmse_per_camera": rmse_per_camera,
-        "mae_per_camera": mae_per_camera,
-        "correlation_per_camera": corr_per_camera,
-    }
-
 @torch.inference_mode()
 def render_concave_zbuffer(
     frame_ids, 
@@ -188,6 +70,7 @@ def render_concave_zbuffer(
     camera_rights,
     camera_ups
 ):
+    """Render rotating concave meshes with orthographic z-buffering."""
 
     if not torch.cuda.is_available():
         raise RuntimeError(
@@ -201,6 +84,7 @@ def render_concave_zbuffer(
     n_samples = face_sample_points.shape[1]
     image_size = ZBUFFER_IMAGE_SIZE
 
+    #Calculate one rotation angle per frame.
     angles = (
         -2.0
         * math.pi
@@ -215,10 +99,12 @@ def render_concave_zbuffer(
     py = face_sample_points[:, :, 1][None, :, :]
     pz = face_sample_points[:, :, 2][None, :, :]
 
+    #Rotate all surface points around the z-axis.
     rotated_x = cosine[:, None, None] * px - sine[:, None, None] * py
     rotated_y = sine[:, None, None] * px + cosine[:, None, None] * py
     rotated_z = pz.expand(batch_size, -1, -1)
 
+    #Similarly, the face normals are rotated.
     nx = face_normals[:, 0][None, :]
     ny = face_normals[:, 1][None, :]
     nz = face_normals[:, 2][None, :]
@@ -232,6 +118,7 @@ def render_concave_zbuffer(
         dim=-1
     )
 
+    #Calculate the Lambertian brightness for each face.
     light_cosine = torch.sum(
         normals_world * light_direction[None, None, :],
         dim=-1
@@ -245,10 +132,12 @@ def render_concave_zbuffer(
         * 255.0
     ).to(torch.int64)
 
+    #Depending on batch, select camera settings.
     view = camera_views[camera_ids]
     right = camera_rights[camera_ids]
     up = camera_ups[camera_ids]
 
+    #Project rotated points onto the orthographic camera plane. 
     x_camera = (
         rotated_x * right[:, None, None, 0]
         + rotated_y * right[:, None, None, 1]
@@ -283,6 +172,7 @@ def render_concave_zbuffer(
         * image_size
     ).long()
 
+    #Keep only samples that project inside the image bounds.
     inside = (
         (x_pixel >= 0)
         & (x_pixel < image_size)
@@ -296,6 +186,7 @@ def render_concave_zbuffer(
     depth = depth.reshape(batch_size, -1)
     inside = inside.reshape(batch_size, -1)
 
+    #Assign face brightness to each sample point on that face.
     brightness_points = face_brightness[:, :, None].expand(
         -1,
         -1,
@@ -351,6 +242,7 @@ def render_concave_zbuffer(
         & (depth >= visible_depth - 1e-5)
     )
 
+    #Hidden samples contribute no brightness.
     brightness_front = torch.where(
         frontmost,
         brightness_points,
