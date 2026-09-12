@@ -15,6 +15,8 @@ BATCH_ID = 1
 N_SAMPLES = 1000
 
 def main():
+    """Generate a batch of randomly rotated and height-normalized cubes."""
+
     rng = np.random.default_rng()
 
     batch_dir = DATASET_DIR / f"batch{BATCH_ID}"
@@ -32,10 +34,10 @@ def main():
 
         mesh = create_random_rotated_cube(rng)
 
-        # Radius des final rotierten UND normierten Würfels.
+        #Measure the radius of the final rotated and normalized cube.
         radius = cylinder_radius_about_z(mesh)
 
-        # Kontrolle der gewünschten Koordinatenkonvention.
+        #Verify the expected coordinate normalization.
         z_min = mesh.vertices[:, 2].min()
         z_max = mesh.vertices[:, 2].max()
 
@@ -43,22 +45,18 @@ def main():
             z_min,
             -1.0,
             atol=1e-6,
-        ), f"z_min ist nicht -1, sondern {z_min}"
+        ), f"z_min is not -1, but {z_min}"
 
         assert np.isclose(
             z_max,
             1.0,
             atol=1e-6,
-        ), f"z_max ist nicht +1, sondern {z_max}"
+        ), f"z_max is not +1, but {z_max}"
 
         assert mesh.is_watertight, (
-            f"Würfel in {sample_dir} ist nicht watertight."
+            f"Cube in {sample_dir} is not watertight."
         )
 
-        # Keine wissenschaftliche Schreibweise verwenden, falls dein
-        # Radius-Regex nur normale Dezimalzahlen unterstützt.
-        #
-        # 12 Nachkommastellen sind für den Dateinamen ausreichend genau.
         stl_name = f"asteroid_radius{radius:.12f}.stl"
         stl_path = sample_dir / stl_name
 
@@ -71,7 +69,9 @@ def main():
             f"watertight={mesh.is_watertight}"
         )
 
-    print(f"\nFertig: {N_SAMPLES} Würfel erzeugt in {batch_dir}")
+    print(
+        f"\nFinished: generated {N_SAMPLES} cubes in {batch_dir}"
+    )
 
 
 if __name__ == "__main__":

@@ -15,6 +15,8 @@ from lightcurve_fips.training.utils import parse_radius_from_stl
 from lightcurve_fips.data.generatedata import (sample_multiple_sdf_sets_from_loaded_mesh2, load_normalized_mesh)
 
 def generate_sdf_for_sample(task):
+    """Generate missing SDF point sets for one dataset sample."""
+
     folder, missing_sets, n_points, tau = task
 
     try:
@@ -37,28 +39,25 @@ def generate_sdf_for_sample(task):
 
         radius = parse_radius_from_stl(stl_path)
 
-        # Erwartete kanonische Normierung:
-        # x_norm = x / radius
-        # y_norm = y / radius
-        # z_norm = z
         mesh = load_normalized_mesh(stl_path, radius)
 
         if mesh.is_empty:
             return {
                 "status": "skipped",
                 "folder": str(folder),
-                "reason": "Mesh ist leer",
+                "reason": "Mesh is empty",
             }
 
         if not mesh.is_watertight:
             return {
                 "status": "skipped",
                 "folder": str(folder),
-                "reason": "Mesh ist nicht watertight",
+                "reason": "Mesh is not watertight",
             }
 
         query = trimesh.proximity.ProximityQuery(mesh)
 
+        #Generate all missing point/SDF subsets for this mesh.
         all_points, all_sdf = sample_multiple_sdf_sets_from_loaded_mesh2(
             mesh=mesh,
             n_sets=len(missing_sets),
@@ -71,8 +70,7 @@ def generate_sdf_for_sample(task):
             points_path = folder / f"points_{n_points}_{k}.npy"
             sdf_path = folder / f"sdf_{n_points}_{k}.npy"
 
-            # Temporäre Namen verhindern halbfertige Dateien,
-            # falls ein Prozess während des Schreibens abstürzt.
+            #Write temporary files first to avoid incomplete output files.
             points_tmp = folder / f".points_{n_points}_{k}.tmp.npy"
             sdf_tmp = folder / f".sdf_{n_points}_{k}.tmp.npy"
 
@@ -95,7 +93,7 @@ def generate_sdf_for_sample(task):
             "reason": repr(exc),
         }
 
-n_points=8192*4
+n_points=8192
 n_sets=4
 tau=0.1
 
@@ -103,19 +101,25 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATASET_DIR = PROJECT_ROOT / "data" / "dataset"
 DATASET_DIR.mkdir(parents=True, exist_ok=True)
 
-N_WORKERS = 56
+N_WORKERS = 8
 
 def collect_tasks():
+    """Collect samples with missing point/SDF file pairs."""
+
     tasks = []
+
     for x in range(155):
         root = DATASET_DIR/f"batch{1+x}"
 
         if not root.exists():
-            print(f"Batch existiert nicht: {root}")
+            print(f"Batch does not exist: {root}")
             continue
+
         samples = sorted([
-            p for p in root.rglob("sample*")
-            if p.is_dir() and list(p.glob("asteroid*.stl"))
+            path
+            for path in root.rglob("sample*")
+            if path.is_dir()
+            and list(path.glob("asteroid*.stl"))
         ])
 
         print("Found samples:", len(samples))
@@ -127,6 +131,7 @@ def collect_tasks():
                 points_path = folder / f"points_{n_points}_{k}.npy"
                 sdf_path = folder / f"sdf_{n_points}_{k}.npy"
 
+                #Reconstruct missing sets.
                 if not (points_path.exists() and sdf_path.exists()):
                     missing_sets.append(k)
 
@@ -142,10 +147,11 @@ def collect_tasks():
     return tasks
 
 if __name__ == "__main__":
+    #Find all samples needing SDF generation.
     tasks = collect_tasks()
 
-    print(f"Samples mit fehlenden SDF-Sets: {len(tasks)}")
-    print(f"Verwendete Worker: {N_WORKERS}")
+    print(f"Samples with missing SDF sets: {len(tasks)}")
+    print(f"Workers used: {N_WORKERS}")
 
     n_success = 0
     n_skipped = 0
@@ -155,6 +161,7 @@ if __name__ == "__main__":
         max_workers=N_WORKERS,
     ) as executor:
         try:
+            #Process in parallel.
             results = executor.map(
                 generate_sdf_for_sample,
                 tasks,
@@ -174,41 +181,46 @@ if __name__ == "__main__":
                 elif status == "skipped":
                     n_skipped += 1
                     print(
-                        f"\nÜbersprungen: {result['folder']} | "
+                        f"\nSkipped: {result['folder']} | "
                         f"{result['reason']}"
                     )
 
                 else:
                     n_errors += 1
                     print(
-                        f"\nFehler: {result['folder']} | "
+                        f"\nError: {result['folder']} | "
                         f"{result['reason']}"
                     )
 
         except KeyboardInterrupt:
-            print("\nAbbruch erkannt – Worker werden beendet ...")
+            print(
+                "\nInterrupt received — terminating workers ..."
+            )
 
-            # Achtung: _processes ist ein internes Attribut von Python.
-            # Für kontrollierte Skripte ist dies dennoch oft praktikabel.
+            #Explicitly terminate active worker processes.
             for process in executor._processes.values():
                 process.terminate()
 
             for process in executor._processes.values():
                 process.join(timeout=5)
 
-                # Falls terminate() nicht genügt:
+                #Force-kill workers that did not terminate cleanly.
                 if process.is_alive():
-                    print(f"Worker {process.pid} reagiert nicht, wird gekillt.")
+                    print(
+                        f"Worker {process.pid} did not respond; "
+                        "killing it."
+                    )
+
                     process.kill()
                     process.join()
 
             raise
 
         finally:
-            # Wartende, noch nicht gestartete Aufgaben verwerfen
+            #Cancel queued tasks that have not started yet.
             executor.shutdown(wait=False, cancel_futures=True)
 
-    print("\nFertig.")
-    print(f"Erfolgreich: {n_success}")
-    print(f"Übersprungen: {n_skipped}")
-    print(f"Fehler:      {n_errors}")
+    print("\nFinished.")
+    print(f"Successful: {n_success}")
+    print(f"Skipped:    {n_skipped}")
+    print(f"Failed:     {n_errors}")

@@ -32,12 +32,13 @@ print(f"Using device: {device}")
 
 dataset = AsteroidSDFPointDatasetCombined("data/dataset", n_points=8192, max_samples=None)
 
-val_fraction=0.1 #relative size of validation set
+val_fraction=0.1
 
 n_total = len(dataset)
 n_val = int(n_total * val_fraction)
 n_train = n_total - n_val
 
+#Use a fixed seed to keep the split between train and validation reproducable.
 generator = torch.Generator().manual_seed(42)
 
 train_dataset, val_dataset = random_split(
@@ -46,8 +47,8 @@ train_dataset, val_dataset = random_split(
     generator=generator
 )
 
+#Use a small validation subset for expensive mesh reconstruction.
 geometry_val_count = min(20, len(val_dataset))
-
 geometry_val_indices = val_dataset.indices[:geometry_val_count]
 
 geometry_val_folders = [
@@ -90,6 +91,7 @@ optimizer = torch.optim.AdamW(
     weight_decay=1e-5,
 )
 
+#Reduce learning rate after model makes no improvements anymore.
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer,
     mode="min",
@@ -120,7 +122,7 @@ run = wandb.init(
         "surface_weight": 5.0,
         "surface_threshold": 0.2,
         "R_max": R_max,
-        "optimizer": "Adam",
+        "optimizer": "AdamW",
         "mixed_precision": "bfloat16" if use_cuda else "disabled",
         "checkpoint_loaded": False,
         "start_epoch": start_epoch,
@@ -134,6 +136,7 @@ best_geometry_voxel_score = -float("inf")
 
 for epoch in range(start_epoch, start_epoch+2400):
     model.train()
+
     total_loss = torch.zeros((), device=device)
     total_raw_loss = torch.zeros((), device=device)
 
@@ -164,16 +167,20 @@ for epoch in range(start_epoch, start_epoch+2400):
                 reduction="none"
             )
 
+            #Give samples near zero level higher training weight.
             weights = 1.0 + 5.0 * (torch.abs(sdf) < 0.2).float()
             sdf_loss = (
                 weights * loss_raw
             ).sum() / weights.sum().clamp_min(1e-8)
 
         sdf_loss.backward()
+
+        #Limit unusually large gradients for a more stable optimization.
         gradient_norm = torch.nn.utils.clip_grad_norm_(
             model.parameters(),
             max_norm=1.0
         )
+
         optimizer.step()
 
         total_loss += sdf_loss.detach()
@@ -190,15 +197,9 @@ for epoch in range(start_epoch, start_epoch+2400):
 
     model.eval()
 
-    val_weighted_loss_sum = torch.zeros(
-        (),
-        device=device
-    )
+    val_weighted_loss_sum = torch.zeros((), device=device)
 
-    val_raw_loss_sum = torch.zeros(
-        (),
-        device=device
-    )
+    val_raw_loss_sum = torch.zeros((), device=device)
 
     with torch.inference_mode():
         for lc, points, sdf, radius in val_loader:
@@ -247,11 +248,13 @@ for epoch in range(start_epoch, start_epoch+2400):
         val_raw_loss_sum / len(val_loader)
     ).item()
 
+    #Schedule according to the unweighted validation loss.
     scheduler.step(mean_val_raw_loss)
 
     eval_every = 5
 
     if epoch % eval_every == 0:
+        #Reconstruct meshes only sparingly, since it is costly.
         geometry_metrics = evaluate_geometry(
             model=model,
             sample_folders=geometry_val_folders,
@@ -270,9 +273,7 @@ for epoch in range(start_epoch, start_epoch+2400):
             f"Voxel: {geometry_metrics['voxel_score']:.4f} | "
             f"Side view: {geometry_metrics['side_view_score']:.4f} | "
             f"Evaluated: {geometry_metrics['n_evaluated']} | "
-            f"Skipped: {geometry_metrics['n_skipped']}| "
-            f"Real_Voxel1: {geometry_metrics['real_voxel1']}| "
-            f"Real_Voxel2: {geometry_metrics['real_voxel2']}"
+            f"Skipped: {geometry_metrics['n_skipped']}"
         )
 
         wandb.log({
@@ -281,47 +282,45 @@ for epoch in range(start_epoch, start_epoch+2400):
             "geometry_val/side_view_score": geometry_metrics["side_view_score"],
             "geometry_val/n_evaluated": geometry_metrics["n_evaluated"],
             "geometry_val/n_skipped": geometry_metrics["n_skipped"],
-            "geometry_val/real_voxel1": geometry_metrics['real_voxel1'],
-            "geometry_val/real_voxel2": geometry_metrics['real_voxel2'],
         })
 
         current_voxel_score = geometry_metrics["voxel_score"]
 
-        if np.isfinite(current_voxel_score):
-            if current_voxel_score > best_geometry_voxel_score:
-                best_geometry_voxel_score = current_voxel_score
+        #Save model with best reconstruction voxel score.
+        if np.isfinite(current_voxel_score) and current_voxel_score > best_geometry_voxel_score:
+            best_geometry_voxel_score = current_voxel_score
 
-                best_path = CHECKPOINT_DIR / "best_by_voxel_score_sdf.pth"
+            best_path = CHECKPOINT_DIR / "best_by_voxel_score_sdf.pth"
 
-                torch.save({
-                    "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "scheduler_state_dict": scheduler.state_dict(),
+            torch.save({
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
 
-                    "train_indices": train_dataset.indices,
-                    "val_indices": val_dataset.indices,
+                "train_indices": train_dataset.indices,
+                "val_indices": val_dataset.indices,
 
-                    "num_cameras": 21,
-                    "num_modalities": 2,
-                    "latent_dim": 256,
-                    "num_freqs": 8,
-                    "n_points": 8192,
-                    "batch_size": TRAIN_BATCH_SIZE,
-                    "surface_weight": 5.0,
-                    "surface_threshold": 0.2,
-                    "R_max": R_max,
-                }, best_path)
+                "num_cameras": 21,
+                "num_modalities": 2,
+                "latent_dim": 256,
+                "num_freqs": 8,
+                "n_points": 8192,
+                "batch_size": TRAIN_BATCH_SIZE,
+                "surface_weight": 5.0,
+                "surface_threshold": 0.2,
+                "R_max": R_max,
+            }, best_path)
 
-                print(
-                    f"New best geometry checkpoint saved: "
-                    f"voxel_score={current_voxel_score:.4f}"
-                )
+            print(
+                f"New best geometry checkpoint saved: "
+                f"voxel_score={current_voxel_score:.4f}"
+            )
 
-                wandb.log({
-                    "geometry_val/best_voxel_score":
-                        best_geometry_voxel_score
-                })
+            wandb.log({
+                "geometry_val/best_voxel_score":
+                    best_geometry_voxel_score
+            })
 
     wandb.log({
         "epoch": epoch,

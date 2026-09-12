@@ -19,10 +19,11 @@ DATASET_DIR.mkdir(parents=True, exist_ok=True)
 
 USE_CONCAVE_ZBUFFER = True
 
+#Rendered image resolution.
 IMAGE_SIZE = 256
-
 ZBUFFER_IMAGE_SIZE = IMAGE_SIZE
 
+#Number of surface samples per mesh face.
 SAMPLES_PER_FACE = 32
 
 CONCAVE_BATCH_SIZE = 128
@@ -31,11 +32,11 @@ FRAMES = 360
 
 LIGHT_DIRECTION = (-1.0, 0.0, 0.0)
 
+#Global Lambertian light intensity multiplier.
 LIGHT_INTENSITY = 3.5
 
+#Duplicate the middle camera to simulate the real world data.
 KEEP_DUPLICATE_MID_CAMERA = True
-
-BATCH_SIZE = 1024
 
 SAVE_DEBUG_NPZ = False
 
@@ -56,9 +57,10 @@ torch.set_grad_enabled(False)
 
 start_time = time.perf_counter()
 
-for batch in range(150):
-    root = DATASET_DIR/f"batch{10+batch}"
-    
+for batch in range(10):
+    root = DATASET_DIR/f"batch{1+batch}"
+
+    #Find all sample folders containing an asteroid STL file.
     samples = sorted([
         p
         for p in root.rglob("sample*")
@@ -66,15 +68,16 @@ for batch in range(150):
         and any(p.glob("asteroid*.stl"))
     ])
     
-    asteroids = list(root.rglob("asteroid*.stl"))
     print("Found asteroids:", len(samples))
+
     for folder in tqdm(
         samples,
-        desc=f"Batch {10 + batch}",
+        desc=f"Batch {1 + batch}",
         unit="asteroid",
     ):
         asteroid_start = time.perf_counter()
 
+        #Get the original STL file.
         stl_path = get_original_stl(folder)
 
         if stl_path is None:
@@ -90,6 +93,7 @@ for batch in range(150):
             + ASTEROID_HALF_HEIGHT ** 2
         )
 
+        #Set the orthographic projection width.
         ORTHO_SCALE = (
             2.0 * bounding_radius / IMAGE_FILL
         )
@@ -102,6 +106,7 @@ for batch in range(150):
 
         n_faces = len(face_areas)
 
+        #Create given camera positions.
         camera_positions_np = create_unique_camera_positions(CAMERA_RADIUS)
 
         n_cameras = len(camera_positions_np)
@@ -110,11 +115,6 @@ for batch in range(150):
             camera_positions_np,
             device=device,
             dtype=torch.float32
-        )
-
-        camera_directions = torch.nn.functional.normalize(
-            camera_positions,
-            dim=1
         )
 
         camera_views_np, camera_rights_np, camera_ups_np = (
@@ -139,6 +139,7 @@ for batch in range(150):
             device=device
         )
 
+        #Sample fixed barycentric positions on every triangle face.
         barycentric_samples = create_barycentric_samples(
             SAMPLES_PER_FACE,
             device
@@ -149,8 +150,6 @@ for batch in range(150):
             triangles,
             barycentric_samples
         )
-
-        
 
         light_direction = torch.tensor(
             LIGHT_DIRECTION,
@@ -163,9 +162,7 @@ for batch in range(150):
             dim=0
         )
 
-        pixel_world_size = ORTHO_SCALE / IMAGE_SIZE
-        pixel_world_area = pixel_world_size ** 2
-
+        #Create all combinations of frames and cameras.
         frame_ids_all = torch.arange(
             FRAMES,
             device=device,
@@ -180,6 +177,7 @@ for batch in range(150):
 
         n_combinations = len(frame_ids_all)
 
+        #First rendered frame determines Otsu thresholds.
         reference_frame_ids = torch.zeros(
             n_cameras,
             dtype=torch.long,
@@ -221,6 +219,7 @@ for batch in range(150):
             dim=0,
         )
 
+        #Calculate binary threshold.
         thresholds = otsu_threshold_batch_uint8(
             reference_images
         )
@@ -237,6 +236,7 @@ for batch in range(150):
             device=device
         )
 
+        #Render all rotation-frame and camera combinations in batches.
         for start in range(0, n_combinations, CONCAVE_BATCH_SIZE):
             end = min(
                 start + CONCAVE_BATCH_SIZE,
@@ -246,6 +246,7 @@ for batch in range(150):
             current_frame_ids = frame_ids_all[start:end]
             current_camera_ids = camera_ids_all[start:end]
 
+            #Render grayscale z-buffer images.
             gray_images = render_concave_zbuffer(
                 current_frame_ids,
                 current_camera_ids, 
@@ -305,6 +306,7 @@ for batch in range(150):
             columns_int = []
             columns_bin = []
 
+            #Add the 7 additional columns to fit to the given lightcurve shape.
             for direction_index in range(7):
                 index = direction_index * 3
 
@@ -373,6 +375,7 @@ for batch in range(150):
         brightness_values_int = brightness_values_int.astype(np.float64)
         brightness_values_bin = brightness_values_bin.astype(np.float64)
 
+        #Normalize each camera specific lightcurve.
         mean_per_camera_bin = brightness_values_bin.mean(
             axis=0,
             keepdims=True
@@ -383,12 +386,14 @@ for batch in range(150):
             keepdims=True
         )
 
+        #Avoid division by 0 when camera is completely dark.
         mean_per_camera_int[mean_per_camera_int == 0] = 1.0
         mean_per_camera_bin[mean_per_camera_bin == 0] = 1.0
 
         brightness_normalized_bin = brightness_values_bin / mean_per_camera_bin
         brightness_normalized_int = brightness_values_int / mean_per_camera_int
 
+        #Add the first column which indicates frame indices.
         frame_column = np.arange(
             1,
             FRAMES + 1,
@@ -440,7 +445,15 @@ for batch in range(150):
 
         asteroid_time = time.perf_counter() - asteroid_start
 
+        print(
+            f"{folder.name} | "
+            f"faces={n_faces} | "
+            f"cameras={n_cameras} | "
+            f"time={asteroid_time:.2f}s"
+        )
+
     end_time = time.perf_counter()
+
     print(
-        f"Time needed: {end_time - start_time:.3f} seconds"
+        f"Total time: {end_time - start_time:.3f} seconds"
     )

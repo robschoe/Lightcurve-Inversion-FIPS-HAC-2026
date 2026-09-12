@@ -26,15 +26,22 @@ DATASET_DIR = PROJECT_ROOT / "data" / "dataset2" / "test" / "test"
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+#Load trained model.
 checkpoint = torch.load(CHECKPOINT_DIR/"best_by_voxel_score_sdf_newsdf_freq8.pth", map_location=device)
 
-R_max = 6
+R_max = checkpoint["R_max"]
 
+#The radius of the object that is to be reconstructed.
 RADIUS=1.4142135623730951
 
-PATH_TO_BINARY_LC = PROJECT_ROOT / "data" / "dataset2" / "test" / "test" / "lc_bin_asteroid2_scaled_radius1.4142135623730951.stl.csv"
-PATH_TO_INTENSITY_LC = PROJECT_ROOT / "data" / "dataset2" / "test" / "test" / "lc_intens_asteroid2_scaled_radius1.4142135623730951.stl.csv"
+PATH_TO_BINARY_LC = DATASET_DIR / "lc_bin_asteroid36radius1.6183293841683848.stl.csv"
+PATH_TO_INTENSITY_LC = DATASET_DIR / "lc_intens_asteroid36radius1.6183293841683848.stl.csv"
 
+OUTPUT_STL = DATASET_DIR / "ASTEROID_RECONSTRUCTION.stl"
+
+GRID_EXTENT = 1.1
+
+#Create model architecture stored in the checkpoint.
 model = LightcurveSDFNet(
     num_cameras=checkpoint["num_cameras"],
     latent_dim=checkpoint["latent_dim"],
@@ -43,32 +50,42 @@ model = LightcurveSDFNet(
 
 model.load_state_dict(checkpoint["model_state_dict"])
 model.eval()
+
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
+#Load binary and intensity lightcurves.
 lc_bin = load_lightcurve(PATH_TO_BINARY_LC)
 lc_intens = load_lightcurve(PATH_TO_INTENSITY_LC)
 
 lc = np.stack([lc_bin, lc_intens], axis=0)
 lc = np.transpose(lc, (0, 2, 1))
-lc = torch.tensor(lc, dtype=torch.float32,device=device)
-lc = lc.unsqueeze(0)
+lc = torch.tensor(lc, dtype=torch.float32,device=device).unsqueeze(0)
 
+#Normalize radius for model.
 radius_model = torch.tensor([RADIUS / R_max], dtype=torch.float32, device=device)
 
-with torch.inference_mode():
-    sdf = reconstruct_sdf(
-        model=model,
-        lc=lc,
-        radius=RADIUS / checkpoint["R_max"],
-        grid_extent=1.1,
-        res=512,
-        device=device,
-    )
+#Evaluate SDF on a regular 3D grid.
+sdf = reconstruct_sdf(
+    model=model,
+    lc=lc,
+    radius=radius_model,
+    grid_extent=GRID_EXTENT,
+    res=512,
+    device=device,
+)
 
+#Extract the SDF zero level set and export it as STL.
 mesh = sdf_to_stl(
     sdf=sdf,
     out_path=PROJECT_ROOT / "data" / "dataset2" / "test" / "test" / "ASTEROID_RECONSTRUCTION.stl",
     radius=RADIUS,
     grid_extent=1.0,
 )
+
+if mesh is None:
+    print("No valid mesh could be extracted because the SDF does not cross zero.")
+else:
+    print(f"Reconstruction saved to: {OUTPUT_STL}")
+    print(f"Watertight: {mesh.is_watertight}")
+    print(f"Faces: {len(mesh.faces)}")
