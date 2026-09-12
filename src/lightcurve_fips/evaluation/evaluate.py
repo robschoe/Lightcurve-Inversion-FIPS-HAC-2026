@@ -22,23 +22,23 @@ def load_mesh(path):
 
     mesh = mesh.copy()
 
-    # Doppelte Faces entfernen
+    #Remove duplicate faces.
     if hasattr(mesh, "unique_faces"):
         mesh.update_faces(mesh.unique_faces())
     elif hasattr(mesh, "remove_duplicate_faces"):
         mesh.remove_duplicate_faces()
 
-    # Degenerierte Faces entfernen
+    #Remove degenerate faces.
     if hasattr(mesh, "nondegenerate_faces"):
         mesh.update_faces(mesh.nondegenerate_faces())
     elif hasattr(mesh, "remove_degenerate_faces"):
         mesh.remove_degenerate_faces()
 
-    # Unbenutzte Vertices entfernen
+    #Remove unreferenced vertices.
     if hasattr(mesh, "remove_unreferenced_vertices"):
         mesh.remove_unreferenced_vertices()
 
-    # Normalen/Konsistenz reparieren, soweit möglich
+    #Repair normals and face orientation when possible.
     try:
         mesh.fix_normals()
     except Exception:
@@ -48,6 +48,8 @@ def load_mesh(path):
 
 
 def normalize_mesh_to_unit_box(mesh, per_axis=False):
+    """Center a mesh and normalize its size to a unit box."""
+
     mesh = mesh.copy()
 
     bounds = mesh.bounds
@@ -72,6 +74,8 @@ def normalize_mesh_to_unit_box(mesh, per_axis=False):
 
 
 def contains_points_chunked(mesh, points, chunk_size=200_000):
+    """Test whether points lie inside a mesh."""
+
     inside = np.zeros(len(points), dtype=bool)
 
     for start in range(0, len(points), chunk_size):
@@ -99,6 +103,8 @@ def voxelize_by_contains(mesh, resolution=128):
 
 
 def voxel_similarity(A, B):
+    """Compute overlap metrics between two voxel volumes."""
+
     A = A.astype(bool)
     B = B.astype(bool)
 
@@ -126,6 +132,8 @@ def voxel_similarity(A, B):
 
 
 def voxel_centers_from_mask(mask, lin):
+    """Return the center coordinates of all occupied voxels."""
+    
     idx = np.argwhere(mask)
 
     if len(idx) == 0:
@@ -165,14 +173,16 @@ def projection_basis(view_dir):
     return u, v
 
 def voxelize_by_trimesh_fill(mesh, resolution=128):
+    """Voxelize a normalized mesh and fill its interior."""
+
     pitch = 1.0 / resolution
 
     voxel_grid = mesh.voxelized(pitch)
 
     try:
         voxel_grid = voxel_grid.fill()
-    except Exception as e:
-        print("Warnung: voxel_grid.fill() fehlgeschlagen:", e)
+    except Exception as exc:
+        print("Warning: voxel_grid.fill() failed:", exc)
 
     points = voxel_grid.points
 
@@ -207,6 +217,8 @@ def voxelize_by_trimesh_fill(mesh, resolution=128):
     return voxels, lin
 
 def project_points_to_mask(points_A, points_B, view_dir, image_res=256):
+    """Project two 3D point sets into binary masks from one view direction."""
+
     u, v = projection_basis(view_dir)
 
     def project(points):
@@ -259,6 +271,8 @@ def project_points_to_mask(points_A, points_B, view_dir, image_res=256):
 
 
 def boundary_from_mask(mask):
+    """Extract boundary pixels from a binary mask."""
+
     if not np.any(mask):
         return np.zeros_like(mask, dtype=bool)
 
@@ -269,6 +283,8 @@ def boundary_from_mask(mask):
 
 
 def symmetric_boundary_distance(mask_A, mask_B):
+    """Compute the symmetric Chamfer distance between two mask boundaries."""
+
     boundary_A = boundary_from_mask(mask_A)
     boundary_B = boundary_from_mask(mask_B)
 
@@ -294,6 +310,8 @@ def symmetric_boundary_distance(mask_A, mask_B):
 
 
 def default_view_directions():
+    """Return normalized axis-aligned and diagonal view directions."""
+
     dirs = [
         [1, 0, 0],
         [0, 1, 0],
@@ -317,6 +335,8 @@ def default_view_directions():
 
 
 def side_view_measure(A, B, lin, image_res=256, view_dirs=None):
+    """Compare projected voxel silhouettes from multiple view directions."""
+
     if view_dirs is None:
         view_dirs = default_view_directions()
 
@@ -362,18 +382,21 @@ def side_view_measure(A, B, lin, image_res=256, view_dirs=None):
     }
 
 def _is_verts_array(a):
+    """Return True if the input looks like a vertex coordinate array."""
     if not isinstance(a, (list, tuple, np.ndarray)):
         return False
     arr = np.asarray(a)
     return arr.ndim == 2 and arr.shape[1] in (3, 4) and np.issubdtype(arr.dtype, np.floating)
 
 def _is_faces_array(a):
+    """Return True if the input looks like a triangle or quad face array."""
     if not isinstance(a, (list, tuple, np.ndarray)):
         return False
     arr = np.asarray(a)
     return arr.ndim == 2 and arr.shape[1] in (3, 4) and np.issubdtype(arr.dtype, np.integer)
 
 def _find_vf_in_object(obj):
+    """Search an object and its direct attributes for vertex and face arrays."""
     candidates_v = {}
     candidates_f = {}
 
@@ -421,20 +444,19 @@ def _find_vf_in_object(obj):
 
     if verts is None and candidates_v:
         verts = next(iter(candidates_v.values()))
+
     if faces is None and candidates_f:
         faces = next(iter(candidates_f.values()))
 
     return verts, faces, candidates_v.keys(), candidates_f.keys()
 
 def make_watertight_with_pymeshfix(input_stl, output_stl):
+    """Repair an STL mesh with PyMeshFix and export the result."""
+
     mesh = trimesh.load(input_stl, force="mesh")
     if isinstance(mesh, trimesh.Scene):
         mesh = trimesh.util.concatenate(list(mesh.geometry.values()))
     mesh = mesh.copy()
-
-    #print("Before watertight:", mesh.is_watertight)
-    #print("Before faces:", len(mesh.faces))
-    #print("Before verts:", len(mesh.vertices))
 
     mf = pymeshfix.MeshFix(mesh.vertices.copy(), mesh.faces.copy())
 
@@ -458,11 +480,14 @@ def make_watertight_with_pymeshfix(input_stl, output_stl):
     verts, faces, cand_vs, cand_fs = _find_vf_in_object(mf)
 
     if verts is None or faces is None:
-        print("Konnte keine v/f Arrays in MeshFix-Objekt finden.")
-        print("Verfügbare Kandidaten (verts):", list(cand_vs))
-        print("Verfügbare Kandidaten (faces):", list(cand_fs))
-        print("Dir(meshfix):", dir(mf))
-        raise RuntimeError("MeshFix repariert, aber konnte v/f nicht extrahieren. Bitte gib dir(dir(meshfix)) Ausgabe und ich helfe weiter.")
+        print("Could not find vertex/face arrays in the MeshFix object.")
+        print("Available vertex candidates:", list(cand_vs))
+        print("Available face candidates:", list(cand_fs))
+        print("dir(meshfix):", dir(mf))
+
+        raise RuntimeError(
+            "MeshFix completed, but repaired vertices/faces could not be extracted."
+        )
 
     faces = np.asarray(faces)
     if not np.issubdtype(faces.dtype, np.integer):
@@ -476,11 +501,6 @@ def make_watertight_with_pymeshfix(input_stl, output_stl):
     except Exception:
         pass
 
-    #print("After watertight:", repaired.is_watertight)
-    #print("After faces:", len(repaired.faces))
-    #print("After verts:", len(repaired.vertices))
-    #print("After volume:", repaired.volume)
-
     repaired.export(output_stl)
     return repaired
 
@@ -491,12 +511,13 @@ def compare_stl_files(
     projection_resolution=256,
     per_axis_normalization=False
 ):
+    """Compare a reconstructed STL mesh against the original STL mesh."""
+
+    #Load and clean both stls.
     true_mesh = load_mesh(true_stl)
     recon_mesh = load_mesh(recon_stl)
 
-    #print("True mesh watertight:", true_mesh.is_watertight)
-    #print("Recon mesh watertight:", recon_mesh.is_watertight)
-
+    #Normalize both meshes.
     true_mesh = normalize_mesh_to_unit_box(
         true_mesh,
         per_axis=per_axis_normalization
@@ -507,14 +528,15 @@ def compare_stl_files(
         per_axis=per_axis_normalization
     )
 
-    #print("Voxelizing true mesh...")
+    #Convert both meshes to voxel volumes.
     A, lin = voxelize_by_trimesh_fill(true_mesh, resolution=voxel_resolution)
 
-    #print("Voxelizing reconstructed mesh...")
     B, _ = voxelize_by_trimesh_fill(recon_mesh, resolution=voxel_resolution)
 
+    #Measure overlap between both voxel grids.
     vox_result = voxel_similarity(A, B)
 
+    #Compare projected silhouette boundaries.
     side_result = side_view_measure(
         A,
         B,
@@ -542,15 +564,6 @@ if __name__ == "__main__":
         per_axis_normalization=False
     )
 
-    #print("\n--- Voxel-based measure ---")
-    # for key, value in vox.items():
-    #     print(f"{key}: {value}")
-
-    # print("\n--- Side-view measure ---")
-    # print("mean_boundary_distance_px:", side["mean_boundary_distance_px"])
-    # print("mean_boundary_distance_normalized:", side["mean_boundary_distance_normalized"])
-    # print("mean_boundary_similarity:", side["mean_boundary_similarity"])
-
 def evaluate_geometry(
     model,
     sample_folders,
@@ -561,6 +574,7 @@ def evaluate_geometry(
     sdf_resolution=32,
     output_dir=None,
 ):
+    """Reconstruct meshes for validation samples and compare them to ground truth."""
     if output_dir is None:
         output_dir = Path("validation_reconstructions")
 
@@ -577,11 +591,22 @@ def evaluate_geometry(
     with torch.no_grad():
         for sample_folder in sample_folders:
             try:
-                csv_path_bin = sorted(sample_folder.glob("lc_bin*.csv"))[0]
-                csv_path_intens = sorted(sample_folder.glob("lc_intens*.csv"))[0]
+                #Find the lightcurves and the original stl file.
+                bin_files = sorted(sample_folder.glob("lc_bin*.csv"))
+                intens_files = sorted(sample_folder.glob("lc_intens*.csv"))
+                stl_files = sorted(sample_folder.glob("asteroid*.stl"))
 
-                true_stl = sorted(sample_folder.glob("asteroid*.stl"))[0]
+                if not bin_files or not intens_files or not stl_files:
+                    raise FileNotFoundError(
+                        "Missing binary lightcurve, intensity lightcurve, "
+                        "or ground-truth STL file."
+                    )
 
+                csv_path_bin = bin_files[0]
+                csv_path_intens = intens_files[0]
+                true_stl = stl_files[0]
+
+                #Load both lightcurves.
                 lc_bin = load_lightcurve(csv_path_bin)
                 lc_intens = load_lightcurve(csv_path_intens)
                 if lc_bin.shape != lc_intens.shape:
@@ -601,6 +626,7 @@ def evaluate_geometry(
                     device=device
                 )
 
+                #Extract radius of given object out of the unconventionally named csv file.
                 match = re.search(
                     r"radius([0-9]+(?:\.[0-9]+)?)",
                     csv_path_bin.name
@@ -613,12 +639,14 @@ def evaluate_geometry(
 
                 radius_value = float(match.group(1))
 
+                #Normalize radius as expected by the model.
                 radius_model = torch.tensor(
                     [radius_value / r_max],
                     dtype=torch.float32,
                     device=device
                 )
 
+                #Get the sdf reconstruction of the given model fitting to the lightcurves.
                 sdf = reconstruct_sdf(
                     model,
                     lc,
@@ -630,6 +658,7 @@ def evaluate_geometry(
                     f"{sample_folder.name}_reconstruction.stl"
                 )
 
+                #Convert the sdf set to an stl for further evaluation.
                 recon_mesh = sdf_to_stl(
                     sdf,
                     recon_stl,
@@ -654,6 +683,7 @@ def evaluate_geometry(
 
                     recon_stl = repaired_stl
 
+                #Compare the original with the reconstruction.
                 vox, side = compare_stl_files(
                     true_stl,
                     recon_stl,
