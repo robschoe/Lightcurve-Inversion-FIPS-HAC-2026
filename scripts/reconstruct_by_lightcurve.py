@@ -19,10 +19,10 @@ from lightcurve_fips.training.utils import (reconstruct_sdf,sdf_to_stl,parse_rad
 from lightcurve_fips.evaluation.evaluate import evaluate_geometry
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints" / "sdf"
+CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints"
 CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
-DATASET_DIR = PROJECT_ROOT / "data" / "dataset2" / "test" / "test"
+DATASET_DIR = PROJECT_ROOT / "data" / "secretasteroids"
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -32,12 +32,12 @@ checkpoint = torch.load(CHECKPOINT_DIR/"best_by_voxel_score_sdf_newsdf_freq8.pth
 R_max = checkpoint["R_max"]
 
 #The radius of the object that is to be reconstructed.
-RADIUS=1.4142135623730951
+RADIUS=3.95
 
-PATH_TO_BINARY_LC = DATASET_DIR / "lc_bin_asteroid36radius1.6183293841683848.stl.csv"
-PATH_TO_INTENSITY_LC = DATASET_DIR / "lc_intens_asteroid36radius1.6183293841683848.stl.csv"
+PATH_TO_BINARY_LC = DATASET_DIR / "lightcurves" / "Asteroid010_lightcurve_binary_blender.txt"
+PATH_TO_INTENSITY_LC = DATASET_DIR / "lightcurves" / "Asteroid010_lightcurve_intensity_blender.txt"
 
-OUTPUT_STL = DATASET_DIR / "ASTEROID_RECONSTRUCTION.stl"
+OUTPUT_STL = DATASET_DIR / "reconstructions"
 
 GRID_EXTENT = 1.1
 
@@ -78,7 +78,7 @@ sdf = reconstruct_sdf(
 #Extract the SDF zero level set and export it as STL.
 mesh = sdf_to_stl(
     sdf=sdf,
-    out_path=PROJECT_ROOT / "data" / "dataset2" / "test" / "test" / "ASTEROID_RECONSTRUCTION.stl",
+    out_path=OUTPUT_STL / "ASTEROID_RECONSTRUCTION.stl",
     radius=RADIUS,
     grid_extent=1.0,
 )
