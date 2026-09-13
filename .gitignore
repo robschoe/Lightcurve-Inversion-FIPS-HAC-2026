@@ -4,7 +4,6 @@ data/dataset2/
 data/publicasteroids
 src/lightcurve_fips/working models/
 diffusionnet_cache
-checkpoints/
 scripts/txtplotter.py
 checkpoints/diffusionnet
 checkpoints/sdf
