@@ -27,15 +27,15 @@ DATASET_DIR = PROJECT_ROOT / "data" / "secretasteroids"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 #Load trained model.
-checkpoint = torch.load(CHECKPOINT_DIR/"best_by_voxel_score_sdf_newsdf_freq8.pth", map_location=device)
+checkpoint = torch.load(CHECKPOINT_DIR/"final_model.pth", map_location=device)
 
 R_max = checkpoint["R_max"]
 
 #The radius of the object that is to be reconstructed.
-RADIUS=3.95
+RADIUS=	1.475
 
-PATH_TO_BINARY_LC = DATASET_DIR / "lightcurves" / "Asteroid010_lightcurve_binary_blender.txt"
-PATH_TO_INTENSITY_LC = DATASET_DIR / "lightcurves" / "Asteroid010_lightcurve_intensity_blender.txt"
+PATH_TO_BINARY_LC = DATASET_DIR / "lightcurves" / "Asteroid04_lightcurve_binary_blender.txt"
+PATH_TO_INTENSITY_LC = DATASET_DIR / "lightcurves" / "Asteroid04_lightcurve_intensity_blender.txt"
 
 OUTPUT_STL = DATASET_DIR / "reconstructions"
 
@@ -80,12 +80,11 @@ mesh = sdf_to_stl(
     sdf=sdf,
     out_path=OUTPUT_STL / "ASTEROID_RECONSTRUCTION.stl",
     radius=RADIUS,
-    grid_extent=1.0,
+    grid_extent=1.1,
 )
 
 if mesh is None:
     print("No valid mesh could be extracted because the SDF does not cross zero.")
 else:
-    print(f"Reconstruction saved to: {OUTPUT_STL}")
     print(f"Watertight: {mesh.is_watertight}")
     print(f"Faces: {len(mesh.faces)}")
